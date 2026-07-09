@@ -1,4 +1,4 @@
-from .models.model import LiquidLinear, Rank1LiquidLN, RankRLiquidLN, StableLiquidLN
+from .model import LiquidLinear, Rank1LiquidLN, RankRLiquidLN, StableLiquidLN
 
 __all__ = [
     "LiquidLinear",
