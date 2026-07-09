@@ -1,0 +1,48 @@
+python-version = "3.12"
+python-platform = "linux"
+
+project-includes = ["llu", "scripts", "tests"]
+project-excludes = [
+    "**/checkpoints/**",
+    "**/wandb/**",
+    "**/data/**",
+    "**/*.ipynb_checkpoints/**",
+    "**/build/**",
+    "**/third_party/**",
+]
+
+# Research code: keep permissive on untyped fast-prototyping code,
+# but still infer as much as possible.
+check-unannotated-defs = true
+infer-return-types = "checked"
+infer-with-first-use = true
+
+preset = "strict"
+
+[errors]
+# Turn off noisy checks common in research/experimental code
+bad-assignment = false # dynamic reassignment across ablations
+implicit-any = false # tensor ops often produce untyped intermediates
+missing-override-decorator = false
+
+# Keep these explicitly on as they catch real crashes in training loops
+bad-instantiation = true
+bad-keyword-argument = true
+unexpected-keyword = true
+division-by-zero = true
+
+# Libraries that are heavily dynamic / lack good stubs. Replace with Any
+# instead of failing on missing imports
+replace-imports-with-any = [
+    "triton.*",
+    "apex.*",
+    "flash_attn.*",
+    "deepspeed.*",
+]
+
+ignore-missing-imports = [
+    "ggml.*",
+    "llama_cpp.*",
+]
+
+search-path = ["llu"]
