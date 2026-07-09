@@ -1,4 +1,4 @@
-from .models.model import (
+from .models import (
     LiquidLinear,
     Rank1LiquidLN,
     RankRLiquidLN,
