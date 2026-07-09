@@ -17,7 +17,8 @@ Available variants:
 
 """
 
-from typing import Optional
+import math
+from typing import Optional, Any, cast
 
 import torch
 import torch.nn as nn
@@ -61,19 +62,18 @@ def _activate(t: torch.Tensor, mode: str, eps: float = 1e-6) -> torch.Tensor:
 def _small_init(module: nn.Module, gain: float = 0.02) -> None:
     r"""_small_init(module, gain=0.02) -> None
 
-    Apply Xavier uniform initialisation with a small gain.
-
-    Linear layers are initialised with :func:`~torch.nn.init.xavier_uniform_`
-    using *gain*; biases (if present) are zeroed.
+    Apply Xavier uniform initialisation with a small gain recursively to all
+    linear layers in the module. Biases (if present) are zeroed.
 
     Args:
-        module (nn.Module): a module (only :class:`~nn.Linear` is handled).
+        module (nn.Module): a module.
         gain (float): scaling gain.  Default: ``0.02``.
     """
-    if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight, gain=gain)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight, gain=gain)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
 
 def _last_linear(module: nn.Module) -> Optional[nn.Linear]:
@@ -104,21 +104,11 @@ def _zero_out_last(module: nn.Module) -> None:
     Respects :class:`~nn.Sequential` -- only the final layer is zeroed so that
     earlier layers can keep a standard init and receive gradient from step 1.
 
-    .. note::
-       This function zeros the *entire* output, which is correct for
-       non-factored outputs (e.g. full weight matrix in :class:`LiquidLinear`).
-       For factored rank outputs use :func:`_zero_b_section` instead so that
-       the a-factors remain active for gradient flow.
-
     Args:
         module (nn.Module): a module or :class:`~nn.Sequential` whose last
             linear layer is zeroed.
     """
-    last = _last_linear(module)
-    if last is not None:
-        nn.init.zeros_(last.weight)
-        if last.bias is not None:
-            nn.init.zeros_(last.bias)
+    _zero_b_section(module, 0)
 
 
 def _zero_b_section(module: nn.Module, b_start: int) -> None:
@@ -148,6 +138,135 @@ def _zero_b_section(module: nn.Module, b_start: int) -> None:
             # Zero entire bias (shared across a/b, a-section still fires via W_a@h).
             if last.bias is not None:
                 last.bias.data.zero_()
+
+
+def _hyperfan_init(
+    module: nn.Module,
+    in_features: int,
+    out_features: int,
+    mode: str = "fan_in",
+    nonlinearity: str = "linear",
+    var_e: float = 1.0,
+    uniform: bool = True,
+    rank: Optional[int] = None,
+) -> None:
+    r"""_hyperfan_init(module, in_features, out_features, mode="fan_in", nonlinearity="linear", var_e=1.0, uniform=True, rank=None) -> None
+
+    Apply Hyperfan initialisation to the last linear layer of a module.
+
+    Assumes Case 1 of the Hyperfan paper: the hypernetwork generates the weights
+    but not the biases of the mainnet.  Biases of the hypernetwork output
+    layer are zeroed.
+
+    For fullweight hypernetworks (rank=None), initializes weights with variance:
+    - fan_in: gain^2 / (in_features * d_hyper * var_e)
+    - fan_out: gain^2 / (out_features * d_hyper * var_e)
+
+    For factorized low-rank hypernetworks (rank is not None), initializes
+    weights generating factors with variance:
+    - fan_in: gain / (d_hyper * var_e * sqrt(rank * in_features))
+    - fan_out: gain / (d_hyper * var_e * sqrt(rank * out_features))
+
+    Args:
+        module (nn.Module): the hypernetwork module or container.
+        in_features (int): mainnet input dimension.
+        out_features (int): mainnet output dimension.
+        mode (str): initialization mode, either ``"fan_in"`` or ``"fan_out"``.
+            Default: ``"fan_in"``.
+        nonlinearity (str): nonlinearity of the mainnet, used to calculate gain.
+            Default: ``"linear"``.
+        var_e (float): variance of the conditioning vector e.  Default: ``1.0``.
+        uniform (bool): if ``True``, use uniform distribution; otherwise normal.
+            Default: ``True``.
+        rank (int, optional): rank of the factorized update.  If ``None``,
+            assumes fullweight generator.
+    """
+    last = _last_linear(module)
+    if isinstance(module, nn.Sequential):
+        for m in module[:-1]:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    if last is None:
+        return
+
+    d_hyper = last.in_features
+    gain = nn.init.calculate_gain(cast(Any, nonlinearity))
+
+    if rank is None:
+        if mode == "fan_in":
+            den = in_features * d_hyper * var_e
+        elif mode == "fan_out":
+            den = out_features * d_hyper * var_e
+        else:
+            raise ValueError(f"Unknown mode '{mode}'; expected 'fan_in' or 'fan_out'")
+
+        if den <= 0:
+            raise ValueError("Denominator in hyperfan variance calculation must be > 0")
+
+        var = (gain**2) / den
+        std = math.sqrt(var)
+    else:
+        if mode == "fan_in":
+            den = d_hyper * var_e * math.sqrt(rank * in_features)
+        elif mode == "fan_out":
+            den = d_hyper * var_e * math.sqrt(rank * out_features)
+        else:
+            raise ValueError(f"Unknown mode '{mode}'; expected 'fan_in' or 'fan_out'")
+
+        if den <= 0:
+            raise ValueError("Denominator in hyperfan variance calculation must be > 0")
+
+        var = gain / den
+        std = math.sqrt(var)
+
+    with torch.no_grad():
+        if uniform:
+            bound = math.sqrt(3.0) * std
+            nn.init.uniform_(last.weight, a=-bound, b=bound)
+        else:
+            nn.init.normal_(last.weight, mean=0.0, std=std)
+
+        if last.bias is not None:
+            nn.init.zeros_(last.bias)
+
+
+def _init_hypernetwork(
+    hypernetwork: nn.Module,
+    init_method: str,
+    in_features: int,
+    out_features: int,
+    rank: Optional[int] = None,
+) -> None:
+    r"""_init_hypernetwork(hypernetwork, init_method, in_features, out_features, rank=None) -> None
+
+    Initialise the hypernetwork using the specified method.
+    """
+    if init_method == "hyperfan_in":
+        _hyperfan_init(hypernetwork, in_features, out_features, mode="fan_in", rank=rank)
+    elif init_method == "hyperfan_out":
+        _hyperfan_init(hypernetwork, in_features, out_features, mode="fan_out", rank=rank)
+    elif init_method == "xavier":
+        _small_init(hypernetwork, gain=1.0)
+    else:  # "small"
+        _small_init(hypernetwork)
+
+
+def _ensure_buffer_shape(buffer: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    r"""_ensure_buffer_shape(buffer, target) -> Tensor
+
+    Return a zeroed tensor with the same shape, device, and dtype as target
+    if buffer does not match, otherwise return buffer.
+    """
+    if (
+        buffer.shape != target.shape
+        or buffer.device != target.device
+        or buffer.dtype != target.dtype
+    ):
+        return torch.zeros_like(target)
+    return buffer
 
 
 # _FreezeMixin: shared freeze_core / freeze_hypernetwork
@@ -206,10 +325,11 @@ class LiquidLinear(_FreezeMixin, nn.Module):
         dynamic_bias: bool = True,
         factor_activation: str = "tanh",
         scale_init: float = 0.9,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, bias=True, dynamic_bias=True, factor_activation="tanh", scale_init=0.9, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, bias=True, dynamic_bias=True, factor_activation="tanh", scale_init=0.9, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -224,6 +344,9 @@ class LiquidLinear(_FreezeMixin, nn.Module):
                 Default: ``"tanh"``.
             scale_init (float): initial value of the per-channel scalar multiplier
                 on the adaptive path.  Default: ``0.9``.
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -235,6 +358,7 @@ class LiquidLinear(_FreezeMixin, nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.factor_activation = factor_activation
+        self.init_method = init_method
 
         # Core weight (always active)
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
@@ -265,12 +389,11 @@ class LiquidLinear(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise the hypernetwork and dynamic bias (if present) with
-        small gains, then zero the output layer so the adaptive path
+        Initialise the hypernetwork and dynamic bias (if present) with the
+        chosen init method, then zero the output layer so the adaptive path
         contributes nothing at step 1.
         """
-        # Zero hypernetwork -> adaptive path = 0
-        _small_init(self.hypernetwork)
+        _init_hypernetwork(self.hypernetwork, self.init_method, self.in_features, self.out_features)
         _zero_out_last(self.hypernetwork)
 
         if self.bias_dynamic is not None:
@@ -336,10 +459,11 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
         factor_activation: str = "norm",
         scale_init: float = 0.9,
         normalize_input: bool = False,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -356,6 +480,9 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
                 on the adaptive path.  Default: ``0.9``.
             normalize_input (bool): if ``True``, apply RMSNorm to the input before
                 feeding it to the hypernetwork.  Default: ``False``.
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -368,6 +495,7 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
         self.out_features = out_features
         self.factor_activation = factor_activation
         self.normalize_input = normalize_input
+        self.init_method = init_method
 
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
@@ -393,11 +521,14 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise the hypernetwork with a small gain, then zero the
+        Initialise the hypernetwork with the chosen init method, then zero the
         b‑section of its output layer so that :math:`\Delta W = 0` at
         step 1 while gradient still flows through the a‑factors.
         """
-        _small_init(self.hypernetwork)
+        _init_hypernetwork(
+            self.hypernetwork, self.init_method, self.in_features, self.out_features, rank=1
+        )
+
         # Zero b-section only; a keeps gradient flowing
         _zero_b_section(self.hypernetwork, self.out_features)
 
@@ -470,10 +601,11 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
         normalize_input: bool = False,
         nonlinear_hypernet: bool = False,
         hyper_hidden_dim: Optional[int] = None,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=1, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, nonlinear_hypernet=False, hyper_hidden_dim=None, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=1, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, nonlinear_hypernet=False, hyper_hidden_dim=None, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -497,6 +629,9 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
             hyper_hidden_dim (int, optional): hidden dimension of the MLP
                 hypernetwork.  Ignored when *nonlinear_hypernet* is ``False``.
                 Default: ``None`` (``max(in_features // 4, rank * 16)``).
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -512,6 +647,7 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
         self.rank = rank
         self.factor_activation = factor_activation
         self.normalize_input = normalize_input
+        self.init_method = init_method
 
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
@@ -543,16 +679,17 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise hypernetwork layers with a small gain (avoids tanh
-        saturation when ``factor_activation="tanh"``), then zero the
+        Initialise hypernetwork layers with the chosen init method, then zero the
         b‑section of the output layer so the adaptive path produces
         zero at step 1 while a‑factors keep gradient flowing.
         """
-        if isinstance(self.hypernetwork, nn.Sequential):
-            for m in self.hypernetwork:
-                _small_init(m)
-        else:
-            _small_init(self.hypernetwork)
+        _init_hypernetwork(
+            self.hypernetwork,
+            self.init_method,
+            self.in_features,
+            self.out_features,
+            rank=self.rank,
+        )
 
         # Zero b-section; a-weights keep small init (avoid tanh saturation).
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
@@ -629,10 +766,11 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
         factor_activation: str = "norm",
         scale_init: float = 0.01,
         normalize_input: bool = True,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -651,6 +789,9 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
                 on the adaptive path.  Default: ``0.01``.
             normalize_input (bool): if ``True``, apply RMSNorm to the conditioning
                 input before the hypernetwork.  Default: ``True``.
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -666,6 +807,7 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
         self.rank = rank
         self.factor_activation = factor_activation
         self.normalize_input = normalize_input
+        self.init_method = init_method
 
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
@@ -697,24 +839,26 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise MLP layers with a small gain (avoids tanh saturation
-        when ``factor_activation="tanh"``), then zero the b-section of
-        the output layer so the adaptive path produces zero at step 1
+        Initialise hypernetwork layers with the chosen init method, then zero the
+        b-section of the output layer so the adaptive path produces zero at step 1
         while a-factors keep gradient flowing.
 
         The dynamic bias MLP (if present) is small-initialised and its
         final layer zeroed.
         """
-        # Small init avoids tanh saturation when ``factor_activation="tanh"``.
-        for m in self.hypernetwork:
-            _small_init(m)
+        _init_hypernetwork(
+            self.hypernetwork,
+            self.init_method,
+            self.in_features,
+            self.out_features,
+            rank=self.rank,
+        )
 
         # Zero b-section; a-factors keep gradient flowing
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
 
         if self.bias_dynamic is not None:
-            for m in self.bias_dynamic[:-1]:
-                _small_init(m)
+            _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -802,10 +946,11 @@ class SharedMomentumLiquidLN(_FreezeMixin, nn.Module):
         factor_activation: str = "norm",
         scale_init: float = 0.01,
         normalize_input: bool = True,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -826,6 +971,9 @@ class SharedMomentumLiquidLN(_FreezeMixin, nn.Module):
                 on the adaptive path.  Default: ``0.01``.
             normalize_input (bool): if ``True``, apply RMSNorm to the conditioning
                 input before the hypernetwork.  Default: ``True``.
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -841,6 +989,7 @@ class SharedMomentumLiquidLN(_FreezeMixin, nn.Module):
         self.rank = rank
         self.factor_activation = factor_activation
         self.normalize_input = normalize_input
+        self.init_method = init_method
 
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
@@ -881,25 +1030,26 @@ class SharedMomentumLiquidLN(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise MLP layers with a small gain (avoids tanh saturation
-        when ``factor_activation="tanh"``), then zero the b-section of
+        Initialise MLP layers with the chosen init method, then zero the b-section of
         the output layer so the adaptive path produces zero at step 1
         while a-factors keep gradient flowing.
 
         The dynamic bias MLP (if present) is small-initialised and its
         final layer zeroed.
         """
-
-        # Small init avoids tanh saturation when ``factor_activation="tanh"``.
-        for m in self.hypernetwork:
-            _small_init(m)
+        _init_hypernetwork(
+            self.hypernetwork,
+            self.init_method,
+            self.in_features,
+            self.out_features,
+            rank=self.rank,
+        )
 
         # Zero b-section; a-factors keep gradient flowing
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
 
         if self.bias_dynamic is not None:
-            for m in self.bias_dynamic[:-1]:
-                _small_init(m)
+            _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -923,12 +1073,16 @@ class SharedMomentumLiquidLN(_FreezeMixin, nn.Module):
 
         core_out = self.linear_core(x)
 
-        raw = self.hypernetwork(h_in)
+        raw: torch.Tensor = self.hypernetwork(h_in)
 
         split = self.rank * self.out_features
 
-        a_new = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
-        b_new = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
+        a_new: torch.Tensor = raw[..., :split].reshape(
+            *h_in.shape[:-1], self.rank, self.out_features
+        )
+        b_new: torch.Tensor = raw[..., split:].reshape(
+            *h_in.shape[:-1], self.rank, self.in_features
+        )
 
         # Rank-level momentum: mean over all batch dims → (rank, feat)
         a_mean = a_new.mean(dim=tuple(range(a_new.ndim - 2)))
@@ -991,10 +1145,11 @@ class BatchMomentumLiquidLN(_FreezeMixin, nn.Module):
         factor_activation: str = "norm",
         scale_init: float = 0.01,
         normalize_input: bool = True,
+        init_method: str = "hyperfan_in",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -1015,6 +1170,9 @@ class BatchMomentumLiquidLN(_FreezeMixin, nn.Module):
                 on the adaptive path.  Default: ``0.01``.
             normalize_input (bool): if ``True``, apply RMSNorm to the conditioning
                 input before the hypernetwork.  Default: ``True``.
+            init_method (str): weight initialisation method for the hypernetwork.
+                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
+                or ``"small"``.  Default: ``"hyperfan_in"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -1030,6 +1188,7 @@ class BatchMomentumLiquidLN(_FreezeMixin, nn.Module):
         self.rank = rank
         self.factor_activation = factor_activation
         self.normalize_input = normalize_input
+        self.init_method = init_method
 
         self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
@@ -1071,25 +1230,26 @@ class BatchMomentumLiquidLN(_FreezeMixin, nn.Module):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise MLP layers with a small gain (avoids tanh saturation
-        when ``factor_activation="tanh"``), then zero the b-section of
+        Initialise MLP layers with the chosen init method, then zero the b-section of
         the output layer so the adaptive path produces zero at step 1
         while a-factors keep gradient flowing.
 
         The dynamic bias MLP (if present) is small-initialised and its
         final layer zeroed.
         """
-
-        # Small init avoids tanh saturation when ``factor_activation="tanh"``.
-        for m in self.hypernetwork:
-            _small_init(m)
+        _init_hypernetwork(
+            self.hypernetwork,
+            self.init_method,
+            self.in_features,
+            self.out_features,
+            rank=self.rank,
+        )
 
         # Zero b-section; a-factors keep gradient flowing
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
 
         if self.bias_dynamic is not None:
-            for m in self.bias_dynamic[:-1]:
-                _small_init(m)
+            _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -1121,18 +1281,8 @@ class BatchMomentumLiquidLN(_FreezeMixin, nn.Module):
         b_new = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
 
         # Re-init buffers if shape/device/dtype mismatch
-        if (
-            self.a_raw.shape != a_new.shape
-            or self.a_raw.device != x.device
-            or self.a_raw.dtype != x.dtype
-        ):
-            self.a_raw = torch.zeros(a_new.shape, device=x.device, dtype=x.dtype)
-        if (
-            self.b_raw.shape != b_new.shape
-            or self.b_raw.device != x.device
-            or self.b_raw.dtype != x.dtype
-        ):
-            self.b_raw = torch.zeros(b_new.shape, device=x.device, dtype=x.dtype)
+        self.a_raw = _ensure_buffer_shape(self.a_raw, a_new)
+        self.b_raw = _ensure_buffer_shape(self.b_raw, b_new)
 
         # Per-batch-element EMA
         self.a_raw = self.a_raw * self.decay_rate + a_new
