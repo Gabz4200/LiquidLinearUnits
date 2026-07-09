@@ -19,18 +19,6 @@ infer-with-first-use = true
 
 preset = "strict"
 
-[errors]
-# Turn off noisy checks common in research/experimental code
-bad-assignment = false # dynamic reassignment across ablations
-implicit-any = false # tensor ops often produce untyped intermediates
-missing-override-decorator = false
-
-# Keep these explicitly on as they catch real crashes in training loops
-bad-instantiation = true
-bad-keyword-argument = true
-unexpected-keyword = true
-division-by-zero = true
-
 # Libraries that are heavily dynamic / lack good stubs. Replace with Any
 # instead of failing on missing imports
 replace-imports-with-any = [
@@ -46,3 +34,15 @@ ignore-missing-imports = [
 ]
 
 search-path = ["llu"]
+
+[errors]
+# Turn off noisy checks common in research/experimental code
+bad-assignment = false # dynamic reassignment across ablations
+implicit-any = false # tensor ops often produce untyped intermediates
+missing-override-decorator = false
+
+# Keep these explicitly on as they catch real crashes in training loops
+bad-instantiation = true
+bad-keyword-argument = true
+unexpected-keyword = true
+division-by-zero = true
