@@ -9,6 +9,7 @@ project-excludes = [
     "**/*.ipynb_checkpoints/**",
     "**/build/**",
     "**/third_party/**",
+    "**/gdn2/**",
 ]
 
 # Research code: keep permissive on untyped fast-prototyping code,
