@@ -173,35 +173,21 @@ def _hyperfan_init(
     if last is None:
         return
 
+    if mode not in {"fan_in", "fan_out"}:
+        raise ValueError(f"Unknown mode '{mode}'; expected 'fan_in' or 'fan_out'")
+
     d_hyper = last.in_features
     gain = nn.init.calculate_gain(cast(Any, nonlinearity))
 
+    base = in_features if mode == "fan_in" else out_features
     if rank is None:
-        if mode == "fan_in":
-            den = in_features * d_hyper * var_e
-        elif mode == "fan_out":
-            den = out_features * d_hyper * var_e
-        else:
-            raise ValueError(f"Unknown mode '{mode}'; expected 'fan_in' or 'fan_out'")
-
-        if den <= 0:
-            raise ValueError("Denominator in hyperfan variance calculation must be > 0")
-
+        den = base * d_hyper * var_e
         var = (gain**2) / den
-        std = math.sqrt(var)
     else:
-        if mode == "fan_in":
-            den = d_hyper * var_e * math.sqrt(rank * in_features)
-        elif mode == "fan_out":
-            den = d_hyper * var_e * math.sqrt(rank * out_features)
-        else:
-            raise ValueError(f"Unknown mode '{mode}'; expected 'fan_in' or 'fan_out'")
-
-        if den <= 0:
-            raise ValueError("Denominator in hyperfan variance calculation must be > 0")
-
+        den = d_hyper * var_e * math.sqrt(rank * base)
         var = gain / den
-        std = math.sqrt(var)
+
+    std = math.sqrt(var)
 
     with torch.no_grad():
         if uniform:

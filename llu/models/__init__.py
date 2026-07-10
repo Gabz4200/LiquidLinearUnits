@@ -1,9 +1,13 @@
-from .liquid_linear import LiquidLinear
-from .rank1_liquid import Rank1LiquidLN
-from .rankr_liquid import RankRLiquidLN
-from .stable_liquid import StableLiquidLN
-from .shared_momentum_liquid import SharedMomentumLiquidLN
-from .batch_momentum_liquid import BatchMomentumLiquidLN
+from .llns import (
+    LiquidLinear,
+    Rank1LiquidLN,
+    RankRLiquidLN,
+    StableLiquidLN,
+    SharedMomentumLiquidLN,
+    BatchMomentumLiquidLN,
+    GDNLiquidLN,
+)
+from .gdn2 import GatedDeltaNet2
 
 __all__ = [
     "LiquidLinear",
@@ -12,4 +16,6 @@ __all__ = [
     "StableLiquidLN",
     "SharedMomentumLiquidLN",
     "BatchMomentumLiquidLN",
+    "GDNLiquidLN",
+    "GatedDeltaNet2",
 ]
