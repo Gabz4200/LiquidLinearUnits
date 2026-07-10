@@ -1,35 +1,125 @@
 import torch
+import pytest
 from llu.models import Rank1LiquidLN
 
-def _get_device(model):
-    return model.linear_core.weight.device
+# =============================================================================
+# HAPPY PATHS
+# =============================================================================
 
-def test_rank1_liquid_behavior():
+
+def test_when_initialization_equivalence_then_output_matches_linear_core():
     torch.manual_seed(42)
     in_features = 8
     out_features = 4
-    
-    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True, normalize_input=True)
-    device = _get_device(model)
+    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True)
+
+    device = model.linear_core.weight.device
     x = torch.randn(2, 3, in_features, device=device)
-    
-    # 1. Init Equivalence
+
+    # At step 1, adaptive path should be zeroed
     out = model(x)
     core_out = model.linear_core(x)
     assert torch.allclose(out, core_out, atol=1e-6)
-    
-    # 2. Shapes
-    assert model(x).shape == (2, 3, out_features)
-    
-    # 3. Freezing
+
+
+def test_when_forward_with_various_dimensions_then_shapes_are_correct():
+    in_features = 8
+    out_features = 4
+    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True)
+    device = model.linear_core.weight.device
+
+    # 1D input
+    x_1d = torch.randn(in_features, device=device)
+    assert model(x_1d).shape == (out_features,)
+
+    # 3D input
+    x_3d = torch.randn(2, 3, in_features, device=device)
+    assert model(x_3d).shape == (2, 3, out_features)
+
+
+def test_when_core_frozen_then_backward_only_updates_hypernetwork():
+    torch.manual_seed(42)
+    in_features = 8
+    out_features = 4
+    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True)
+    device = model.linear_core.weight.device
+
+    # Enable grad for everything
     for p in model.parameters():
         p.requires_grad = True
+
     model.freeze_core()
-    assert not model.linear_core.weight.requires_grad
-    assert model.hypernetwork.weight.requires_grad
-    
+
+    x = torch.randn(2, in_features, device=device)
+    y = torch.randn(2, out_features, device=device)
+    loss = (model(x) - y).pow(2).sum()
+    loss.backward()
+
+    # Core should not have gradients
+    assert model.linear_core.weight.grad is None
+    if model.linear_core.bias is not None:
+        assert model.linear_core.bias.grad is None
+
+    # Adaptive path should have gradients
+    assert model.hypernetwork.weight.grad is not None
+    assert model.scale.grad is not None
+
+
+def test_when_hypernetwork_frozen_then_backward_only_updates_core():
+    torch.manual_seed(42)
+    in_features = 8
+    out_features = 4
+    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True)
+    device = model.linear_core.weight.device
+
+    # Enable grad for everything
     for p in model.parameters():
         p.requires_grad = True
+
     model.freeze_hypernetwork()
-    assert model.linear_core.weight.requires_grad
-    assert not model.hypernetwork.weight.requires_grad
+
+    x = torch.randn(2, in_features, device=device)
+    y = torch.randn(2, out_features, device=device)
+    loss = (model(x) - y).pow(2).sum()
+    loss.backward()
+
+    # Core should have gradients
+    assert model.linear_core.weight.grad is not None
+
+    # Hypernetwork/scale should not have gradients
+    assert model.hypernetwork.weight.grad is None
+    assert model.scale.grad is None
+
+
+# =============================================================================
+# UNHAPPY PATHS & EDGE CASES
+# =============================================================================
+
+
+def test_when_input_shape_mismatched_then_raises_runtime_error():
+    in_features = 8
+    out_features = 4
+    model = Rank1LiquidLN(in_features, out_features)
+    device = model.linear_core.weight.device
+
+    # Input has 10 features instead of 8
+    x_invalid = torch.randn(2, 10, device=device)
+    with pytest.raises(RuntimeError):
+        model(x_invalid)
+
+
+def test_when_extreme_input_values_then_numerical_stability_preserved():
+    in_features = 8
+    out_features = 4
+    model = Rank1LiquidLN(in_features, out_features, bias=True, dynamic_bias=True)
+    device = model.linear_core.weight.device
+
+    # Large inputs that could cause overflow/NaNs in activations
+    x_large = torch.zeros(2, in_features, device=device)
+    x_large[0, :] = 1e4
+    x_large[1, :] = -1e4
+
+    out = model(x_large)
+    assert out.shape == (2, out_features)
+    assert not torch.isnan(out).any(), "NaN detected with extreme inputs"
+    assert not torch.isinf(out).any(), "Inf detected with extreme inputs"
