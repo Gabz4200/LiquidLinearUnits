@@ -9,8 +9,6 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
-    _init_hypernetwork,
-    _zero_b_section,
 )
 
 
@@ -99,13 +97,7 @@ class Rank1LiquidLN(BaseLLU):
         b‑section of its output layer so that :math:`\Delta W = 0` at
         step 1 while gradient still flows through the a‑factors.
         """
-        _init_hypernetwork(
-            self.hypernetwork, self.init_method, self.in_features, self.out_features, rank=1
-        )
-
-        # Zero b-section only; a keeps gradient flowing
-        _zero_b_section(self.hypernetwork, self.out_features)
-        self._init_bias_dynamic()
+        self._init_low_rank_adaptive(self.hypernetwork, self.out_features, rank=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""forward(x) -> Tensor

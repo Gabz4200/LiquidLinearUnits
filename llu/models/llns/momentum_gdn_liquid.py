@@ -9,9 +9,6 @@ from llu.models.gdn2 import GatedDeltaNet2
 from .base import BaseMomentumLLU
 from .utils import (
     DEVICE,
-    _activate,
-    _init_hypernetwork,
-    _zero_b_section,
 )
 
 
@@ -51,6 +48,7 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         scale_init: float = 0.01,
         normalize_input: bool = True,
         init_method: str = "hyperfan_in",
+        learnable_decay_rate: bool = False,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -78,6 +76,8 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
             scale_init (float): initial value of scale multiplier. Default: ``0.01``.
             normalize_input (bool): if ``True``, apply RMSNorm to the conditioning input before GDN-2. Default: ``True``.
             init_method (str): weight initialisation method for proj_out. Default: ``"hyperfan_in"``.
+            learnable_decay_rate (bool): if ``True``, the decay rate is a learnable
+                parameter (nn.Parameter). Default: ``False``.
             device (torch.device, optional): device of parameters. Default: ``None``.
             dtype (torch.dtype): data type of parameters. Default: ``torch.float32``.
         """
@@ -92,13 +92,13 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
             scale_init=scale_init,
             factor_activation=factor_activation,
             init_method=init_method,
+            learnable_decay_rate=learnable_decay_rate,
             device=device,
             dtype=dtype,
         )
         dev = device if device is not None else DEVICE
 
         self.normalize_input = normalize_input
-        self.decay_rate = nn.Parameter(torch.tensor(initial_decay_rate, device=dev, dtype=dtype))
 
         # GDN-2 block as the sequence processor
         self.gdn2 = GatedDeltaNet2(
@@ -153,19 +153,7 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         """
         # Initialize GDN-2 internal weights
         self.gdn2.apply(self.gdn2._initialize_weights)
-
-        # Initialize the projection layer
-        _init_hypernetwork(
-            self.proj_out,
-            self.init_method,
-            self.in_features,
-            self.out_features,
-            rank=self.rank,
-        )
-
-        # Zero b-section; a-factors keep gradient flowing
-        _zero_b_section(self.proj_out, self.rank * self.out_features)
-        self._init_bias_dynamic()
+        self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
 
     def forward(
         self,

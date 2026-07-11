@@ -9,8 +9,6 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
-    _init_hypernetwork,
-    _zero_b_section,
 )
 
 
@@ -121,17 +119,7 @@ class RankRLiquidLN(BaseLLU):
         b‑section of the output layer so the adaptive path produces
         zero at step 1 while a‑factors keep gradient flowing.
         """
-        _init_hypernetwork(
-            self.hypernetwork,
-            self.init_method,
-            self.in_features,
-            self.out_features,
-            rank=self.rank,
-        )
-
-        # Zero b-section; a-weights keep small init (avoid tanh saturation).
-        _zero_b_section(self.hypernetwork, self.rank * self.out_features)
-        self._init_bias_dynamic()
+        self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""forward(x) -> Tensor

@@ -8,8 +8,6 @@ from typing import Optional
 from .base import BaseMomentumLLU
 from .utils import (
     DEVICE,
-    _init_hypernetwork,
-    _zero_b_section,
 )
 
 
@@ -43,10 +41,11 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         scale_init: float = 0.01,
         normalize_input: bool = True,
         init_method: str = "hyperfan_in",
+        learnable_decay_rate: bool = False,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -70,6 +69,8 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
             init_method (str): weight initialisation method for the hypernetwork.
                 One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
                 or ``"small"``.  Default: ``"hyperfan_in"``.
+            learnable_decay_rate (bool): if ``True``, the decay rate is a learnable
+                parameter (nn.Parameter). Default: ``False``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -86,13 +87,13 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
             scale_init=scale_init,
             factor_activation=factor_activation,
             init_method=init_method,
+            learnable_decay_rate=learnable_decay_rate,
             device=device,
             dtype=dtype,
         )
         dev = device if device is not None else DEVICE
 
         self.normalize_input = normalize_input
-        self.decay_rate = decay_rate
 
         # Placeholder buffer; real shape is set on first forward via the guard
         self.register_buffer(
@@ -133,17 +134,7 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         The dynamic bias MLP (if present) is small-initialised and its
         final layer zeroed.
         """
-        _init_hypernetwork(
-            self.hypernetwork,
-            self.init_method,
-            self.in_features,
-            self.out_features,
-            rank=self.rank,
-        )
-
-        # Zero b-section; a-factors keep gradient flowing
-        _zero_b_section(self.hypernetwork, self.rank * self.out_features)
-        self._init_bias_dynamic()
+        self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         r"""forward(x, cond=None) -> Tensor

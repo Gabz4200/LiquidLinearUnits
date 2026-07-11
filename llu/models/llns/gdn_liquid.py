@@ -10,8 +10,6 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
-    _init_hypernetwork,
-    _zero_b_section,
 )
 
 
@@ -142,19 +140,7 @@ class GDNLiquidLN(BaseLLU):
         """
         # Initialize GDN-2 internal weights
         self.gdn2.apply(self.gdn2._initialize_weights)
-
-        # Initialize the projection layer
-        _init_hypernetwork(
-            self.proj_out,
-            self.init_method,
-            self.in_features,
-            self.out_features,
-            rank=self.rank,
-        )
-
-        # Zero b-section; a-factors keep gradient flowing
-        _zero_b_section(self.proj_out, self.rank * self.out_features)
-        self._init_bias_dynamic()
+        self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
 
     def forward(
         self,
