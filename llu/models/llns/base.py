@@ -8,6 +8,8 @@ from .utils import (
     _activate,
     _small_init,
     _zero_out_last,
+    _zero_b_section,
+    _init_hypernetwork,
     _ensure_buffer_shape,
     _FreezeMixin,
 )
@@ -52,6 +54,32 @@ class BaseLLU(_FreezeMixin, nn.Module):
             _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
+    def _init_low_rank_adaptive(
+        self,
+        target: nn.Module,
+        b_start: int,
+        rank: Optional[int] = None,
+    ) -> None:
+        r"""_init_low_rank_adaptive(target, b_start, rank=None) -> None
+
+        Initialise a low-rank hypernetwork / projection module so the adaptive
+        path contributes zero at step 1 while gradients still flow through the
+        a-factors.  Shared by every rank-based LLU variant; the GDN variants
+        prepend the GDN-2 internal init before calling this.
+
+        Args:
+            target (nn.Module): the hypernetwork or projection module whose
+                last linear layer is initialised.
+            b_start (int): row index where the b-section begins
+                (``rank * out_features``).
+            rank (int, optional): rank passed to the hyperfan variance scaling.
+        """
+        _init_hypernetwork(
+            target, self.init_method, self.in_features, self.out_features, rank=rank
+        )
+        _zero_b_section(target, b_start)
+        self._init_bias_dynamic()
+
     def _apply_dynamic_bias(self, out: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         if self.bias_dynamic is not None:
             out = out + self.bias_dynamic(cond)
@@ -83,6 +111,7 @@ class BaseMomentumLLU(BaseLLU):
         scale_init: float = 0.01,
         factor_activation: str = "norm",
         init_method: str = "hyperfan_in",
+        learnable_decay_rate: bool = False,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -99,16 +128,21 @@ class BaseMomentumLLU(BaseLLU):
             dtype=dtype,
         )
         self.rank = rank
+        self.decay_rate = nn.Parameter(
+            torch.full((), decay_rate, device=self.linear_core.weight.device)
+        )
+        self.decay_rate.requires_grad = learnable_decay_rate
         dev = device if device is not None else DEVICE
         self.rank_scale = nn.Parameter(
             torch.full((rank,), 1.0, device=dev, dtype=dtype)
         )
 
+    def set_decay_rate_learnable(self, learnable: bool = True) -> None:
+        self.decay_rate.requires_grad = learnable
+
     @property
     def local_decay_rate(self) -> torch.Tensor:
-        if isinstance(self.decay_rate, nn.Parameter):
-            return torch.sigmoid(self.decay_rate)
-        return self.decay_rate
+        return torch.sigmoid(self.decay_rate)
 
     def _update_shared_momentum(
         self,
