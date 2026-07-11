@@ -172,6 +172,7 @@ def test_when_optimizing_then_updates_core_hypernet_and_buffers():
     x = torch.randn(2, 3, in_features, device=device)
     target = torch.randn(2, 3, out_features, device=device)
 
+    model.set_decay_rate_learnable(True)
     decay_rate_init = model.decay_rate.item()
 
     # Step 1: Forward & Backward
