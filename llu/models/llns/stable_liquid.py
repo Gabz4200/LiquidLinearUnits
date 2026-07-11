@@ -5,18 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
     _init_hypernetwork,
     _zero_b_section,
-    _small_init,
-    _zero_out_last,
-    _FreezeMixin,
 )
 
 
-class StableLiquidLN(_FreezeMixin, nn.Module):
+class StableLiquidLN(BaseLLU):
     """Production‑oriented variant with nonlinear hypernetwork and normalised factors.
 
     The hypernetwork is a 2‑layer MLP (SiLU).  Generated factors are
@@ -68,19 +66,22 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
             dtype (torch.dtype): the desired data type of the parameters.
                 Default: ``torch.float32``.
         """
-        super().__init__()
         if rank < 1:
             raise ValueError(f"rank must be >= 1, got {rank}")
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            scale_init=scale_init,
+            factor_activation=factor_activation,
+            init_method=init_method,
+            device=device,
+            dtype=dtype,
+        )
         dev = device if device is not None else DEVICE
 
-        self.in_features = in_features
-        self.out_features = out_features
         self.rank = rank
-        self.factor_activation = factor_activation
         self.normalize_input = normalize_input
-        self.init_method = init_method
-
-        self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
         # MLP hypernetwork
         hidden_dim = hyper_hidden_dim or max(in_features // 4, rank * 16)
@@ -90,8 +91,6 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
             nn.Linear(hidden_dim, rank * (out_features + in_features), device=dev, dtype=dtype),
         )
 
-        # Scaling dial
-        self.scale = nn.Parameter(torch.full((out_features,), scale_init, device=dev, dtype=dtype))
         self.rank_scale = nn.Parameter(torch.full((rank,), 1.0, device=dev, dtype=dtype))
 
         # Dynamic bias with MLP
@@ -127,10 +126,7 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
 
         # Zero b-section; a-factors keep gradient flowing
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
-
-        if self.bias_dynamic is not None:
-            _small_init(self.bias_dynamic)
-            _zero_out_last(self.bias_dynamic)
+        self._init_bias_dynamic()
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         r"""forward(x, cond=None) -> Tensor
@@ -161,15 +157,9 @@ class StableLiquidLN(_FreezeMixin, nn.Module):
         a = _activate(a_raw, self.factor_activation)
         b = _activate(b_raw, self.factor_activation)
 
-        dot = torch.matmul(b, x.unsqueeze(-1)).squeeze(-1)  # (..., rank)
-        dot = dot * self.rank_scale
-
-        adaptive = torch.matmul(dot.unsqueeze(-2), a).squeeze(-2)  # (..., O)
-
-        out = core_out + adaptive * self.scale
-
-        if self.bias_dynamic is not None:
-            out = out + self.bias_dynamic(cond)
+        adaptive = self._compute_low_rank_adaptive(a, b, x)
+        out = core_out + adaptive
+        out = self._apply_dynamic_bias(out, cond)
 
         return out
 

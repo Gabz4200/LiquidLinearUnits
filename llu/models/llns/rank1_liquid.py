@@ -5,18 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
     _init_hypernetwork,
     _zero_b_section,
-    _small_init,
-    _zero_out_last,
-    _FreezeMixin,
 )
 
 
-class Rank1LiquidLN(_FreezeMixin, nn.Module):
+class Rank1LiquidLN(BaseLLU):
     """Input‑conditioned rank‑1 update (lightweight).
 
     The hypernetwork outputs a single pair of vectors :math:`a \\in \\mathbb{R}^O`,
@@ -64,16 +62,18 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
             dtype (torch.dtype): the desired data type of the parameters.
                 Default: ``torch.float32``.
         """
-        super().__init__()
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            scale_init=scale_init,
+            factor_activation=factor_activation,
+            init_method=init_method,
+            device=device,
+            dtype=dtype,
+        )
         dev = device if device is not None else DEVICE
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.factor_activation = factor_activation
         self.normalize_input = normalize_input
-        self.init_method = init_method
-
-        self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
         # Single hypernetwork -> a (O) + b (I)
         self.hypernetwork = nn.Linear(
@@ -83,8 +83,6 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
             device=dev,
             dtype=dtype,
         )
-
-        self.scale = nn.Parameter(torch.full((out_features,), scale_init, device=dev, dtype=dtype))
 
         self.bias_dynamic: Optional[nn.Linear] = (
             nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
@@ -107,10 +105,7 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
 
         # Zero b-section only; a keeps gradient flowing
         _zero_b_section(self.hypernetwork, self.out_features)
-
-        if self.bias_dynamic is not None:
-            _small_init(self.bias_dynamic)
-            _zero_out_last(self.bias_dynamic)
+        self._init_bias_dynamic()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""forward(x) -> Tensor
@@ -130,17 +125,13 @@ class Rank1LiquidLN(_FreezeMixin, nn.Module):
 
         raw = self.hypernetwork(h_in)  # (..., O + I)
 
-        a = _activate(raw[..., : self.out_features], self.factor_activation)
-        b = _activate(raw[..., self.out_features :], self.factor_activation)
+        a = _activate(raw[..., :self.out_features].reshape(*h_in.shape[:-1], 1, self.out_features), self.factor_activation)
+        b = _activate(raw[..., self.out_features:].reshape(*h_in.shape[:-1], 1, self.in_features), self.factor_activation)
 
-        # delta_W x = a(b·x) so no full matrix needed (avoid unnecessary memory allocation)
-        dot = torch.sum(x * b, dim=-1, keepdim=True)  # (..., 1)
-        adaptive = a * dot  # (..., O)
+        adaptive = self._compute_low_rank_adaptive(a, b, x)
+        out = self.linear_core(x) + adaptive
 
-        out = self.linear_core(x) + adaptive * self.scale
-
-        if self.bias_dynamic is not None:
-            out = out + self.bias_dynamic(x)
+        out = self._apply_dynamic_bias(out, x)
 
         return out
 

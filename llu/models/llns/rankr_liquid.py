@@ -5,18 +5,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
     _init_hypernetwork,
     _zero_b_section,
-    _small_init,
-    _zero_out_last,
-    _FreezeMixin,
 )
 
 
-class RankRLiquidLN(_FreezeMixin, nn.Module):
+class RankRLiquidLN(BaseLLU):
     """Input‑conditioned rank‑R update.
 
     Generates :math:`R` pairs of factors :math:`\\{a_r, b_r\\}`.  The dynamic
@@ -75,19 +73,22 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
             dtype (torch.dtype): the desired data type of the parameters.
                 Default: ``torch.float32``.
         """
-        super().__init__()
         if rank < 1:
             raise ValueError(f"rank must be >= 1, got {rank}")
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            scale_init=scale_init,
+            factor_activation=factor_activation,
+            init_method=init_method,
+            device=device,
+            dtype=dtype,
+        )
         dev = device if device is not None else DEVICE
 
-        self.in_features = in_features
-        self.out_features = out_features
         self.rank = rank
-        self.factor_activation = factor_activation
         self.normalize_input = normalize_input
-        self.init_method = init_method
-
-        self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
         # Hypernetwork: linear or 2-layer MLP
         hyper_out_dim = rank * (out_features + in_features)
@@ -103,7 +104,6 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
                 in_features, hyper_out_dim, bias=True, device=dev, dtype=dtype
             )
 
-        self.scale = nn.Parameter(torch.full((out_features,), scale_init, device=dev, dtype=dtype))
         self.rank_scale = nn.Parameter(torch.full((rank,), 1.0, device=dev, dtype=dtype))
 
         self.bias_dynamic: Optional[nn.Linear] = (
@@ -131,10 +131,7 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
 
         # Zero b-section; a-weights keep small init (avoid tanh saturation).
         _zero_b_section(self.hypernetwork, self.rank * self.out_features)
-
-        if self.bias_dynamic is not None:
-            _small_init(self.bias_dynamic)
-            _zero_out_last(self.bias_dynamic)
+        self._init_bias_dynamic()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""forward(x) -> Tensor
@@ -157,17 +154,10 @@ class RankRLiquidLN(_FreezeMixin, nn.Module):
         a = _activate(a_raw, self.factor_activation)
         b = _activate(b_raw, self.factor_activation)
 
-        # Dot products: b_r @ x -> (..., rank)
-        dot = torch.matmul(b, x.unsqueeze(-1)).squeeze(-1)  # (..., rank)
-        dot = dot * self.rank_scale
+        adaptive = self._compute_low_rank_adaptive(a, b, x)
+        out = self.linear_core(x) + adaptive
 
-        # Weighted sum over rank
-        adaptive = torch.matmul(dot.unsqueeze(-2), a).squeeze(-2)  # (..., O)
-
-        out = self.linear_core(x) + adaptive * self.scale
-
-        if self.bias_dynamic is not None:
-            out = out + self.bias_dynamic(x)
+        out = self._apply_dynamic_bias(out, x)
 
         return out
 

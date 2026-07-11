@@ -4,17 +4,16 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
+from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
     _init_hypernetwork,
     _zero_out_last,
-    _small_init,
-    _FreezeMixin,
 )
 
 
-class LiquidLinear(_FreezeMixin, nn.Module):
+class LiquidLinear(BaseLLU):
     """Input‑conditioned full weight matrix.
 
     Memory **O(B · O · I)**: use only for small dimensions.  The hypernetwork
@@ -59,16 +58,17 @@ class LiquidLinear(_FreezeMixin, nn.Module):
             dtype (torch.dtype): the desired data type of the parameters.
                 Default: ``torch.float32``.
         """
-        super().__init__()
+        super().__init__(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            scale_init=scale_init,
+            factor_activation=factor_activation,
+            init_method=init_method,
+            device=device,
+            dtype=dtype,
+        )
         dev = device if device is not None else DEVICE
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.factor_activation = factor_activation
-        self.init_method = init_method
-
-        # Core weight (always active)
-        self.linear_core = nn.Linear(in_features, out_features, bias=bias, device=dev, dtype=dtype)
 
         # Hypernetwork -> full out x in matrix
         self.hypernetwork = nn.Linear(
@@ -78,9 +78,6 @@ class LiquidLinear(_FreezeMixin, nn.Module):
             device=dev,
             dtype=dtype,
         )
-
-        # Per-channel dial for adaptive path
-        self.scale = nn.Parameter(torch.full((out_features,), scale_init, device=dev, dtype=dtype))
 
         # Optional input‑dependent bias
         self.bias_dynamic: Optional[nn.Linear] = (
@@ -102,10 +99,7 @@ class LiquidLinear(_FreezeMixin, nn.Module):
         """
         _init_hypernetwork(self.hypernetwork, self.init_method, self.in_features, self.out_features)
         _zero_out_last(self.hypernetwork)
-
-        if self.bias_dynamic is not None:
-            _small_init(self.bias_dynamic)
-            _zero_out_last(self.bias_dynamic)
+        self._init_bias_dynamic()
 
     # Forward
 
@@ -132,9 +126,7 @@ class LiquidLinear(_FreezeMixin, nn.Module):
 
         # Scale adaptive path, add bias
         out = core_out + adaptive * self.scale
-
-        if self.bias_dynamic is not None:
-            out = out + self.bias_dynamic(x)
+        out = self._apply_dynamic_bias(out, x)
 
         return out
 

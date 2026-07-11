@@ -5,6 +5,7 @@ from .stable_liquid import StableLiquidLN
 from .shared_momentum_liquid import SharedMomentumLiquidLN
 from .batch_momentum_liquid import BatchMomentumLiquidLN
 from .gdn_liquid import GDNLiquidLN
+from .momentum_gdn_liquid import MomentumGDNLiquidLN
 
 __all__ = [
     "LiquidLinear",
@@ -14,4 +15,5 @@ __all__ = [
     "SharedMomentumLiquidLN",
     "BatchMomentumLiquidLN",
     "GDNLiquidLN",
+    "MomentumGDNLiquidLN",
 ]

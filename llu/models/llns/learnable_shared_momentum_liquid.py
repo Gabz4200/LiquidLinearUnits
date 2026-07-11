@@ -1,4 +1,4 @@
-r"""BatchMomentumLiquidLN: per-batch-element momentum."""
+r"""Learnable SharedMomentumLiquidLN: rank-level momentum shared across batch with learnable decay rate."""
 
 import torch
 import torch.nn as nn
@@ -13,19 +13,24 @@ from .utils import (
 )
 
 
-class BatchMomentumLiquidLN(BaseMomentumLLU):
-    r"""Input-conditioned rank-:math:`R` update with per-batch-element momentum.
+class LearnableSharedMomentumLiquidLN(BaseMomentumLLU):
+    r"""Input-conditioned rank-:math:`R` update with exponential-moving-average momentum.
 
-    Like :class:`SharedMomentumLiquidLN` but the momentum is tracked separately
-    for each element in the batch dimension.  The raw buffers have shape
-    ``(*batch, rank, feat)`` -- the batch dimensions are included and each
-    :math:`(b_1, \dots, b_n)` slice has its own state.
+    Extends :class:`StableLiquidLN` with momentum over the generated factors.
+    At each forward pass the raw hypernetwork outputs are blended into persistent
+    buffers ``a_raw`` and ``b_raw`` via
 
-    Because the buffer shape depends on the input, a runtime guard detects
-    shape/device/dtype mismatches and re-initialises the buffer when needed
-    (e.g. on batch-size changes).  This makes it slightly heavier than
-    :class:`SharedMomentumLiquidLN` but necessary when per-sample momentum
-    dynamics are required.
+    :math:`\mathtt{a\_raw} \gets \mathtt{a\_raw} \cdot \mathtt{decay\_rate}
+    + a_{\text{raw}}^{\text{(new)}}`
+
+    before activation and the rank-:math:`R` update. The momentum smooths
+    factor transitions across time steps.
+
+    **Shared (rank-level) momentum.** The raw factors from all batch elements
+    are averaged before blending into the buffer, so the buffer has no batch
+    dimension -- shape ``(rank, feat)``.  All samples share the same momentum
+    state, which suits autoregressive teacher-forcing where the relevant
+    dynamics are per-position, not per-sample.
 
     Zero-initialised so the adaptive path contributes nothing at step 1.
     """
@@ -92,14 +97,13 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         dev = device if device is not None else DEVICE
 
         self.normalize_input = normalize_input
-        self.decay_rate = decay_rate
+        self.decay_rate = nn.Parameter(torch.tensor(decay_rate, device=dev, dtype=dtype))
 
-        # Placeholder buffer; real shape is set on first forward via the guard
         self.register_buffer(
-            "a_raw", torch.zeros(1, rank, out_features, device=dev, dtype=dtype), persistent=True
+            "a_raw", torch.zeros(rank, out_features, device=dev, dtype=dtype), persistent=True
         )
         self.register_buffer(
-            "b_raw", torch.zeros(1, rank, in_features, device=dev, dtype=dtype), persistent=True
+            "b_raw", torch.zeros(rank, in_features, device=dev, dtype=dtype), persistent=True
         )
 
         # MLP hypernetwork
@@ -166,14 +170,18 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
 
         core_out = self.linear_core(x)
 
-        raw = self.hypernetwork(h_in)
+        raw: torch.Tensor = self.hypernetwork(h_in)
 
         split = self.rank * self.out_features
 
-        a_new = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
-        b_new = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
+        a_new: torch.Tensor = raw[..., :split].reshape(
+            *h_in.shape[:-1], self.rank, self.out_features
+        )
+        b_new: torch.Tensor = raw[..., split:].reshape(
+            *h_in.shape[:-1], self.rank, self.in_features
+        )
 
-        a, b = self._update_batch_momentum(a_new, b_new)
+        a, b = self._update_shared_momentum(a_new, b_new)
 
         adaptive = self._compute_low_rank_adaptive(a, b, x)
         out = core_out + adaptive

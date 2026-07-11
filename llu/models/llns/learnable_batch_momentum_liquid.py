@@ -1,4 +1,4 @@
-r"""BatchMomentumLiquidLN: per-batch-element momentum."""
+r"""Learnable BatchMomentumLiquidLN: per-batch-element momentum."""
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ from .utils import (
 )
 
 
-class BatchMomentumLiquidLN(BaseMomentumLLU):
+class LearnableBatchMomentumLiquidLN(BaseMomentumLLU):
     r"""Input-conditioned rank-:math:`R` update with per-batch-element momentum.
 
     Like :class:`SharedMomentumLiquidLN` but the momentum is tracked separately
@@ -92,7 +92,7 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         dev = device if device is not None else DEVICE
 
         self.normalize_input = normalize_input
-        self.decay_rate = decay_rate
+        self.decay_rate = nn.Parameter(torch.tensor(decay_rate, device=dev, dtype=dtype))
 
         # Placeholder buffer; real shape is set on first forward via the guard
         self.register_buffer(

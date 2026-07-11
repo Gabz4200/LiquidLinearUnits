@@ -1,4 +1,4 @@
-r"""GDNLiquidLN: Liquid Linear Unit with a Gated DeltaNet 2 (GDN-2) block."""
+r"""MomentumGDNLiquidLN: Liquid Linear Unit with a Gated DeltaNet 2 (GDN-2) block and shared momentum."""
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from typing import Optional, Any, Literal
 
 from llu.models.gdn2 import GatedDeltaNet2
-from .base import BaseLLU
+from .base import BaseMomentumLLU
 from .utils import (
     DEVICE,
     _activate,
@@ -15,12 +15,13 @@ from .utils import (
 )
 
 
-class GDNLiquidLN(BaseLLU):
-    """Liquid Linear Unit utilizing a Gated DeltaNet 2 (GDN-2) block.
+class MomentumGDNLiquidLN(BaseMomentumLLU):
+    """Liquid Linear Unit utilizing a Gated DeltaNet 2 (GDN-2) block with momentum.
 
     The hypernetwork is a stateful GDN-2 block which processes the conditioning
     input sequence. The accumulated context shapes the low-rank factor matrices,
-    forming a dynamic sequence-dependent linear transformation.
+    forming a dynamic sequence-dependent linear transformation. The raw factors
+    are smoothed using a shared momentum buffer across all batch elements.
 
     Zero-initialised so the adaptive path contributes nothing at step 1.
     """
@@ -30,6 +31,7 @@ class GDNLiquidLN(BaseLLU):
         in_features: int,
         out_features: int,
         rank: int = 4,
+        initial_decay_rate: float = 0.8,
         # GDN-2 specific parameters
         expand_v: float = 1.0,
         head_dim: int = 16,
@@ -52,12 +54,13 @@ class GDNLiquidLN(BaseLLU):
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=4, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=4, initial_decay_rate=0.8, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
             out_features (int): size of each output sample.
             rank (int): number of factor pairs :math:`(a_r, b_r)`. Default: ``4``.
+            initial_decay_rate (float): initial decay rate for momentum. Default: ``0.8``.
             expand_v (float): expansion ratio for value dimension in GDN-2. Default: ``1.0``.
             head_dim (int): dimension of each GDN-2 head. Default: ``16``.
             num_heads (int): number of GDN-2 heads. Default: ``4``.
@@ -83,6 +86,8 @@ class GDNLiquidLN(BaseLLU):
         super().__init__(
             in_features=in_features,
             out_features=out_features,
+            decay_rate=initial_decay_rate,
+            rank=rank,
             bias=bias,
             scale_init=scale_init,
             factor_activation=factor_activation,
@@ -92,8 +97,8 @@ class GDNLiquidLN(BaseLLU):
         )
         dev = device if device is not None else DEVICE
 
-        self.rank = rank
         self.normalize_input = normalize_input
+        self.decay_rate = nn.Parameter(torch.tensor(initial_decay_rate, device=dev, dtype=dtype))
 
         # GDN-2 block as the sequence processor
         self.gdn2 = GatedDeltaNet2(
@@ -122,7 +127,13 @@ class GDNLiquidLN(BaseLLU):
             dtype=dtype,
         )
 
-        self.rank_scale = nn.Parameter(torch.full((rank,), 1.0, device=dev, dtype=dtype))
+        # Momentum
+        self.register_buffer(
+            "a_raw", torch.zeros(rank, out_features, device=dev, dtype=dtype), persistent=True
+        )
+        self.register_buffer(
+            "b_raw", torch.zeros(rank, in_features, device=dev, dtype=dtype), persistent=True
+        )
 
         # Dynamic bias projected from GDN-2 features
         self.bias_dynamic = (
@@ -180,6 +191,10 @@ class GDNLiquidLN(BaseLLU):
         """
         cond = cond if cond is not None else x
 
+        # Detach buffers to prevent graph-reuse errors during independent steps
+        self.a_raw = self.a_raw.detach()
+        self.b_raw = self.b_raw.detach()
+
         # RMSNorm for magnitude invariance
         h_in = F.rms_norm(cond, (self.in_features,)) if self.normalize_input else cond
 
@@ -211,11 +226,10 @@ class GDNLiquidLN(BaseLLU):
         core_out = self.linear_core(x)
 
         split = self.rank * self.out_features
-        a_raw = raw[..., :split].reshape(*orig_shape[:-1], self.rank, self.out_features)
-        b_raw = raw[..., split:].reshape(*orig_shape[:-1], self.rank, self.in_features)
+        a_new = raw[..., :split].reshape(*orig_shape[:-1], self.rank, self.out_features)
+        b_new = raw[..., split:].reshape(*orig_shape[:-1], self.rank, self.in_features)
 
-        a = _activate(a_raw, self.factor_activation)
-        b = _activate(b_raw, self.factor_activation)
+        a, b = self._update_shared_momentum(a_new, b_new, detach=True)
 
         adaptive = self._compute_low_rank_adaptive(a, b, x)
         out = core_out + adaptive
@@ -232,5 +246,5 @@ class GDNLiquidLN(BaseLLU):
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"gdn_mode={self.gdn2.mode}"
+            f"gdn_mode={self.gdn2.mode}, decay_rate={self.decay_rate.item():.4f}"
         )
