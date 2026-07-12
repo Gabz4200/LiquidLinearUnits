@@ -9,6 +9,7 @@ from .llns import (
     MomentumGDNLiquidLN,
 )
 from .gdn2 import GatedDeltaNet2
+from .liquid_model import LiquidTransformer, build_model, ARCH_FACTORIES
 
 __all__ = [
     "LiquidLinear",
@@ -20,4 +21,7 @@ __all__ = [
     "GDNLiquidLN",
     "MomentumGDNLiquidLN",
     "GatedDeltaNet2",
+    "LiquidTransformer",
+    "build_model",
+    "ARCH_FACTORIES",
 ]
