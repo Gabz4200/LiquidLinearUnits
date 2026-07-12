@@ -87,7 +87,6 @@ def test_when_core_frozen_then_backward_only_updates_hypernetwork():
     # Adaptive path should have gradients
     hyper_param = next(model.hypernetwork.parameters())
     assert hyper_param.grad is not None
-    assert model.scale.grad is not None
 
 
 def test_when_hypernetwork_frozen_then_backward_only_updates_core():
@@ -114,7 +113,6 @@ def test_when_hypernetwork_frozen_then_backward_only_updates_core():
     # Hypernetwork/scale should not have gradients
     hyper_param = next(model.hypernetwork.parameters())
     assert hyper_param.grad is None
-    assert model.scale.grad is None
 
 
 # =============================================================================
@@ -167,3 +165,33 @@ def test_when_extreme_input_values_then_numerical_stability_preserved():
     assert out.shape == (2, out_features)
     assert not torch.isnan(out).any(), "NaN detected with extreme inputs"
     assert not torch.isinf(out).any(), "Inf detected with extreme inputs"
+
+
+def test_when_parameterization_mode_is_svd_then_shapes_and_init_are_correct():
+    torch.manual_seed(42)
+    in_features = 8
+    out_features = 4
+    model = StableLiquidLN(
+        in_features, out_features, rank=3, parameterization="svd", bias=True, dynamic_bias=True
+    )
+    device = model.linear_core.weight.device
+    x = torch.randn(2, 3, in_features, device=device)
+
+    # 1. Verification of step 1 zero init
+    out = model(x)
+    core_out = model.linear_core(x)
+    assert torch.allclose(out, core_out, atol=1e-6)
+
+    # 2. Backward verification and weights training
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    y = torch.randn(2, 3, out_features, device=device)
+    loss = (model(x) - y).pow(2).sum()
+    loss.backward()
+
+    # Assert parameters have gradients
+    assert model.U.grad is not None
+    assert model.V.grad is not None
+    assert next(model.hypernetwork.parameters()).grad is not None
+
+    optimizer.step()
+

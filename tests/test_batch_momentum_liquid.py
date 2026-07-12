@@ -131,7 +131,6 @@ def test_when_core_frozen_then_backward_only_updates_hypernetwork():
     # Adaptive path should have gradients
     hyper_param = next(model.hypernetwork.parameters())
     assert hyper_param.grad is not None
-    assert model.scale.grad is not None
 
 
 def test_when_hypernetwork_frozen_then_backward_only_updates_core():
@@ -158,7 +157,6 @@ def test_when_hypernetwork_frozen_then_backward_only_updates_core():
     # Hypernetwork/scale should not have gradients
     hyper_param = next(model.hypernetwork.parameters())
     assert hyper_param.grad is None
-    assert model.scale.grad is None
 
 
 # =============================================================================

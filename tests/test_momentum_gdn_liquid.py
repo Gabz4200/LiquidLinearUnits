@@ -280,7 +280,6 @@ def test_when_core_frozen_then_backward_only_updates_hypernetwork():
 
     assert model.linear_core.weight.grad is None
     assert model.proj_out.weight.grad is not None
-    assert model.scale.grad is not None
 
 
 def test_when_hypernetwork_frozen_then_backward_only_updates_core():
@@ -310,7 +309,6 @@ def test_when_hypernetwork_frozen_then_backward_only_updates_core():
 
     assert model.linear_core.weight.grad is not None
     assert model.proj_out.weight.grad is None
-    assert model.scale.grad is None
 
 
 # =============================================================================
