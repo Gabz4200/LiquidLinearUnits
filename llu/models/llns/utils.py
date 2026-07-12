@@ -10,6 +10,18 @@ import torch.nn.functional as F
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 _VALID_ACTIVATIONS = frozenset({"tanh", "norm", "rmsnorm", "none"})
+_VALID_PARAMETERIZATIONS = frozenset({"lora", "svd"})
+
+
+def _validate_parameterization(parameterization: str) -> None:
+    r"""_validate_parameterization(parameterization) -> None
+
+    Fail fast on an unsupported parameterization mode.
+    """
+    if parameterization not in _VALID_PARAMETERIZATIONS:
+        raise ValueError(
+            f"parameterization must be 'lora' or 'svd', got {parameterization}"
+        )
 
 
 def _activate(t: torch.Tensor, mode: str, eps: float = 1e-6) -> torch.Tensor:
@@ -216,7 +228,11 @@ def _init_hypernetwork(
     elif init_method == "hyperfan_out":
         _hyperfan_init(hypernetwork, in_features, out_features, mode="fan_out", rank=rank)
     elif init_method == "xavier":
-        _small_init(hypernetwork, gain=1.0)
+        for m in hypernetwork.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
     else:  # "small"
         _small_init(hypernetwork)
 
@@ -234,6 +250,50 @@ def _ensure_buffer_shape(buffer: torch.Tensor, target: torch.Tensor) -> torch.Te
     ):
         return torch.zeros_like(target)
     return buffer
+
+
+def _run_gdn2_to_factors(
+    gdn2: nn.Module,
+    h_in: torch.Tensor,
+    proj_out: nn.Module,
+    *,
+    rank: int,
+    in_features: int,
+    out_features: int,
+    parameterization: str,
+    attention_mask: Optional[torch.Tensor],
+    past_key_values: Optional[Any],
+    use_cache: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+    r"""_run_gdn2_to_factors(gdn2, h_in, proj_out, *, rank, in_features, out_features, parameterization, attention_mask, past_key_values, use_cache) -> (orig_shape, gdn_out, raw, past_key_values)
+
+    Run a GDN-2 block on *h_in* and project its output to dynamic factors.
+
+    Collapses arbitrary leading dimensions of *h_in* into a single batch
+    dimension for the 3-D (batch, seq, dim) GDN-2 block, then reshapes the
+    projected factors back to the original leading dimensions.  Shared by the
+    GDN-2 based LLU variants so the 3-D prep / reshape logic lives in one
+    place instead of being copy-pasted across them.
+    """
+    orig_shape = h_in.shape
+    ndim = len(orig_shape)
+    if ndim == 1:
+        h_in_3d = h_in.unsqueeze(0).unsqueeze(0)
+    elif ndim == 2:
+        h_in_3d = h_in.unsqueeze(1)
+    else:
+        h_in_3d = h_in.flatten(0, -3)
+
+    gdn_out, _, past_key_values = gdn2(
+        h_in_3d,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        use_cache=use_cache,
+    )
+
+    proj_out_dim = rank if parameterization == "svd" else rank * (out_features + in_features)
+    raw = proj_out(gdn_out).view(*orig_shape[:-1], proj_out_dim)
+    return orig_shape, gdn_out, raw, past_key_values
 
 
 class _FreezeMixin:

@@ -9,18 +9,15 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
+    _validate_parameterization,
 )
 
 
 class RankRLiquidLN(BaseLLU):
     """Input‑conditioned rank‑R update.
 
-    Generates :math:`R` pairs of factors :math:`\\{a_r, b_r\\}`.  The dynamic
-    update is :math:`\\Delta W = \\sum_{r=1}^R \\alpha_r \\, a_r \\otimes b_r`
-    where :math:`\\alpha_r` = ``rank_scale[r]``.
-
-    The hypernetwork can be a plain Linear (faster) or a 2‑layer MLP with
-    SiLU (more expressive) by setting *nonlinear_hypernet*.
+    Generates :math:`R` pairs of factors :math:`\\{a_r, b_r\\}` under "lora",
+    or a scaling vector :math:`g` under "svd" parameterization.
     """
 
     def __init__(
@@ -36,10 +33,11 @@ class RankRLiquidLN(BaseLLU):
         nonlinear_hypernet: bool = False,
         hyper_hidden_dim: Optional[int] = None,
         init_method: str = "hyperfan_in",
+        parameterization: str = "lora",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=1, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, nonlinear_hypernet=False, hyper_hidden_dim=None, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=1, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, nonlinear_hypernet=False, hyper_hidden_dim=None, init_method="hyperfan_in", parameterization="lora", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -66,6 +64,8 @@ class RankRLiquidLN(BaseLLU):
             init_method (str): weight initialisation method for the hypernetwork.
                 One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
                 or ``"small"``.  Default: ``"hyperfan_in"``.
+            parameterization (str): parameterization mode for the update, either
+                ``"lora"`` or ``"svd"``. Default: ``"lora"``.
             device (torch.device, optional): the desired device of the parameters.
                 Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -73,6 +73,8 @@ class RankRLiquidLN(BaseLLU):
         """
         if rank < 1:
             raise ValueError(f"rank must be >= 1, got {rank}")
+        _validate_parameterization(parameterization)
+
         super().__init__(
             in_features=in_features,
             out_features=out_features,
@@ -87,9 +89,11 @@ class RankRLiquidLN(BaseLLU):
 
         self.rank = rank
         self.normalize_input = normalize_input
+        self.parameterization = parameterization
 
-        # Hypernetwork: linear or 2-layer MLP
-        hyper_out_dim = rank * (out_features + in_features)
+        # Hypernetwork output dimension
+        hyper_out_dim = rank if self.parameterization == "svd" else rank * (out_features + in_features)
+
         if nonlinear_hypernet:
             hidden = hyper_hidden_dim or max(in_features // 4, rank * 16)
             self.hypernetwork: nn.Module = nn.Sequential(
@@ -102,7 +106,8 @@ class RankRLiquidLN(BaseLLU):
                 in_features, hyper_out_dim, bias=True, device=dev, dtype=dtype
             )
 
-        self.rank_scale = nn.Parameter(torch.full((rank,), 1.0, device=dev, dtype=dtype))
+        if self.parameterization == "svd":
+            self._create_svd_factors(dev, dtype)
 
         self.bias_dynamic: Optional[nn.Linear] = (
             nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
@@ -115,11 +120,12 @@ class RankRLiquidLN(BaseLLU):
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
 
-        Initialise hypernetwork layers with the chosen init method, then zero the
-        b‑section of the output layer so the adaptive path produces
-        zero at step 1 while a‑factors keep gradient flowing.
+        Initialise hypernetwork layers with the chosen init method.
         """
-        self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
+        if self.parameterization == "lora":
+            self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
+        else:
+            self._init_svd_projection(self.hypernetwork)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""forward(x) -> Tensor
@@ -128,23 +134,28 @@ class RankRLiquidLN(BaseLLU):
             x (Tensor): input tensor of shape ``(..., in_features)``.
 
         Returns:
-            Tensor: output tensor of shape ``(..., out_features)`` computed as
-            :math:`\text{core}(x) + \text{scale} \odot \sum_{r=1}^R \alpha_r \,
-            a_r \, (b_r \cdot x)`, where :math:`\alpha_r` = ``rank_scale[r]``.
+            Tensor: output tensor of shape ``(..., out_features)``.
         """
         h_in = F.rms_norm(x, (self.in_features,)) if self.normalize_input else x
         raw = self.hypernetwork(h_in)
 
-        split = self.rank * self.out_features
-        a_raw = raw[..., :split].reshape(*x.shape[:-1], self.rank, self.out_features)
-        b_raw = raw[..., split:].reshape(*x.shape[:-1], self.rank, self.in_features)
+        core_out = self.linear_core(x)
 
-        a = _activate(a_raw, self.factor_activation)
-        b = _activate(b_raw, self.factor_activation)
+        if self.parameterization == "lora":
+            split = self.rank * self.out_features
+            a_raw = raw[..., :split].reshape(*x.shape[:-1], self.rank, self.out_features)
+            b_raw = raw[..., split:].reshape(*x.shape[:-1], self.rank, self.in_features)
 
-        adaptive = self._compute_low_rank_adaptive(a, b, x)
-        out = self.linear_core(x) + adaptive
+            a = _activate(a_raw, self.factor_activation)
+            b = _activate(b_raw, self.factor_activation)
 
+            adaptive = self._compute_low_rank_adaptive(a, b, x)
+        else:
+            # SVD mode
+            g = _activate(raw, self.factor_activation)
+            adaptive = self._compute_svd_adaptive(x, g)
+
+        out = core_out + adaptive
         out = self._apply_dynamic_bias(out, x)
 
         return out
@@ -154,5 +165,5 @@ class RankRLiquidLN(BaseLLU):
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"nonlinear_hypernet={nonlinear}"
+            f"nonlinear_hypernet={nonlinear}, mode={self.parameterization}"
         )

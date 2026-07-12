@@ -125,7 +125,7 @@ class LiquidLinear(BaseLLU):
         adaptive = torch.matmul(W, x.unsqueeze(-1)).squeeze(-1)  # (..., O)
 
         # Scale adaptive path, add bias
-        out = core_out + adaptive * self.scale
+        out = core_out + adaptive
         out = self._apply_dynamic_bias(out, x)
 
         return out

@@ -10,6 +10,8 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
+    _validate_parameterization,
+    _run_gdn2_to_factors,
 )
 
 
@@ -47,10 +49,11 @@ class GDNLiquidLN(BaseLLU):
         scale_init: float = 0.01,
         normalize_input: bool = True,
         init_method: str = "hyperfan_in",
+        parameterization: str = "lora",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=4, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=4, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", parameterization="lora", device=None, dtype=torch.float32) -> None
 
         Args:
             in_features (int): size of each input sample.
@@ -73,11 +76,15 @@ class GDNLiquidLN(BaseLLU):
             scale_init (float): initial value of scale multiplier. Default: ``0.01``.
             normalize_input (bool): if ``True``, apply RMSNorm to the conditioning input before GDN-2. Default: ``True``.
             init_method (str): weight initialisation method for proj_out. Default: ``"hyperfan_in"``.
+            parameterization (str): parameterization mode for the update, either
+                ``"lora"`` or ``"svd"``. Default: ``"lora"``.
             device (torch.device, optional): device of parameters. Default: ``None``.
             dtype (torch.dtype): data type of parameters. Default: ``torch.float32``.
         """
         if rank < 1:
             raise ValueError(f"rank must be >= 1, got {rank}")
+        _validate_parameterization(parameterization)
+
         super().__init__(
             in_features=in_features,
             out_features=out_features,
@@ -92,6 +99,7 @@ class GDNLiquidLN(BaseLLU):
 
         self.rank = rank
         self.normalize_input = normalize_input
+        self.parameterization = parameterization
 
         # GDN-2 block as the sequence processor
         self.gdn2 = GatedDeltaNet2(
@@ -111,16 +119,18 @@ class GDNLiquidLN(BaseLLU):
             dtype=dtype,
         )
 
-        # Output projection from GDN-2 features to low-rank factors
+        # Output projection from GDN-2 features to low-rank factors or scale
+        proj_out_dim = rank if self.parameterization == "svd" else rank * (out_features + in_features)
         self.proj_out = nn.Linear(
             in_features,
-            rank * (out_features + in_features),
+            proj_out_dim,
             bias=True,
             device=dev,
             dtype=dtype,
         )
 
-        self.rank_scale = nn.Parameter(torch.full((rank,), 1.0, device=dev, dtype=dtype))
+        if self.parameterization == "svd":
+            self._create_svd_factors(dev, dtype)
 
         # Dynamic bias projected from GDN-2 features
         self.bias_dynamic = (
@@ -140,7 +150,11 @@ class GDNLiquidLN(BaseLLU):
         """
         # Initialize GDN-2 internal weights
         self.gdn2.apply(self.gdn2._initialize_weights)
-        self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
+
+        if self.parameterization == "lora":
+            self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
+        else:
+            self._init_svd_projection(self.proj_out)
 
     def forward(
         self,
@@ -161,49 +175,43 @@ class GDNLiquidLN(BaseLLU):
             use_cache (bool): whether to return the updated cache. Default: ``False``.
 
         Returns:
-            Tensor or (Tensor, Cache): sequence output of shape ``(..., out_features)``,
-            optionally with the updated state cache if ``use_cache`` is ``True``.
+            Tensor or (Tensor, Cache): sequence output of shape ``(..., out_features)``.
         """
         cond = cond if cond is not None else x
 
         # RMSNorm for magnitude invariance
         h_in = F.rms_norm(cond, (self.in_features,)) if self.normalize_input else cond
 
-        # Save original shape to reconstruct output shape
-        orig_shape = h_in.shape
-
-        # Prepare 3D shape for GatedDeltaNet2 (batch, seq_len, dim)
-        if len(orig_shape) == 1:
-            h_in_3d = h_in.unsqueeze(0).unsqueeze(0)
-        elif len(orig_shape) == 2:
-            h_in_3d = h_in.unsqueeze(1)
-        else:
-            h_in_3d = h_in.flatten(0, -3)
-
-        # Run GatedDeltaNet2 sequence model
-        gdn_out, _, past_key_values = self.gdn2(
-            h_in_3d,
+        # Run GDN-2 and project its output to dynamic factors, preserving the
+        # original leading dimensions.
+        orig_shape, gdn_out, raw, past_key_values = _run_gdn2_to_factors(
+            self.gdn2,
+            h_in,
+            self.proj_out,
+            rank=self.rank,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            parameterization=self.parameterization,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
 
-        # Project GDN-2 output to the low-rank factors
-        raw = self.proj_out(gdn_out)
-
-        # Reshape raw back to original leading dimensions
-        raw = raw.view(*orig_shape[:-1], self.rank * (self.out_features + self.in_features))
-
         core_out = self.linear_core(x)
 
-        split = self.rank * self.out_features
-        a_raw = raw[..., :split].reshape(*orig_shape[:-1], self.rank, self.out_features)
-        b_raw = raw[..., split:].reshape(*orig_shape[:-1], self.rank, self.in_features)
+        if self.parameterization == "lora":
+            split = self.rank * self.out_features
+            a_raw = raw[..., :split].reshape(*orig_shape[:-1], self.rank, self.out_features)
+            b_raw = raw[..., split:].reshape(*orig_shape[:-1], self.rank, self.in_features)
 
-        a = _activate(a_raw, self.factor_activation)
-        b = _activate(b_raw, self.factor_activation)
+            a = _activate(a_raw, self.factor_activation)
+            b = _activate(b_raw, self.factor_activation)
 
-        adaptive = self._compute_low_rank_adaptive(a, b, x)
+            adaptive = self._compute_low_rank_adaptive(a, b, x)
+        else:
+            g = _activate(raw, self.factor_activation)
+            adaptive = self._compute_svd_adaptive(x, g)
+
         out = core_out + adaptive
 
         if self.bias_dynamic is not None:
@@ -218,5 +226,5 @@ class GDNLiquidLN(BaseLLU):
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"gdn_mode={self.gdn2.mode}"
+            f"gdn_mode={self.gdn2.mode}, mode={self.parameterization}"
         )

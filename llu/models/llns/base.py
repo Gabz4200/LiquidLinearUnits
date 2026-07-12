@@ -44,10 +44,17 @@ class BaseLLU(_FreezeMixin, nn.Module):
         self.linear_core = nn.Linear(
             in_features, out_features, bias=bias, device=dev, dtype=dtype
         )
-        self.scale = nn.Parameter(
-            torch.full((out_features,), scale_init, device=dev, dtype=dtype)
-        )
+        nn.init.xavier_uniform_(self.linear_core.weight)
+        if self.linear_core.bias is not None:
+            nn.init.zeros_(self.linear_core.bias)
         self.bias_dynamic: Optional[nn.Module] = None
+        self.U: Optional[nn.Parameter] = None
+        self.V: Optional[nn.Parameter] = None
+        # Declared here (not just on subclasses) so the SVD- and
+        # parameterization-aware helpers can reference them without risking an
+        # AttributeError before a subclass assigns the concrete value.
+        self.rank: Optional[int] = None
+        self.parameterization: Optional[str] = None
 
     def _init_bias_dynamic(self) -> None:
         if self.bias_dynamic is not None:
@@ -85,6 +92,49 @@ class BaseLLU(_FreezeMixin, nn.Module):
             out = out + self.bias_dynamic(cond)
         return out
 
+    def _compute_svd_adaptive(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""_compute_svd_adaptive(x, g) -> Tensor
+
+        SVD-parameterized adaptive path: ``((x @ V) * g) @ U``.
+        """
+        v = torch.matmul(x, self.V)
+        modulated = v * g
+        return torch.matmul(modulated, self.U)
+
+    def _create_svd_factors(
+        self,
+        device: Optional[torch.device],
+        dtype: torch.dtype,
+    ) -> None:
+        r"""_create_svd_factors(device, dtype) -> None
+
+        Create the static U/V factors for SVD parameterization (uninitialised;
+        :meth:`_init_svd_projection` fills them with xavier)."""
+        self.U = nn.Parameter(
+            torch.empty(self.rank, self.out_features, device=device, dtype=dtype)
+        )
+        self.V = nn.Parameter(
+            torch.empty(self.in_features, self.rank, device=device, dtype=dtype)
+        )
+
+    def _init_svd_projection(self, proj: nn.Module) -> None:
+        r"""_init_svd_projection(proj) -> None
+
+        Initialise the SVD projection module and U/V: hyperfan-init *proj*, zero
+        its last layer (zero adaptive path at step 1), then xavier-init U/V and
+        the optional dynamic bias."""
+        _init_hypernetwork(
+            proj, self.init_method, self.in_features, self.out_features, rank=self.rank
+        )
+        _zero_out_last(proj)
+        nn.init.xavier_uniform_(self.U)
+        nn.init.xavier_uniform_(self.V)
+        self._init_bias_dynamic()
+
     def _compute_low_rank_adaptive(
         self,
         a: torch.Tensor,
@@ -92,10 +142,8 @@ class BaseLLU(_FreezeMixin, nn.Module):
         x: torch.Tensor,
     ) -> torch.Tensor:
         dot = torch.matmul(b, x.unsqueeze(-1)).squeeze(-1)  # (..., rank)
-        if hasattr(self, "rank_scale"):
-            dot = dot * self.rank_scale
         adaptive = torch.matmul(dot.unsqueeze(-2), a).squeeze(-2)  # (..., O)
-        return adaptive * self.scale
+        return adaptive
 
 
 class BaseMomentumLLU(BaseLLU):
@@ -132,10 +180,6 @@ class BaseMomentumLLU(BaseLLU):
             torch.full((), decay_rate, device=self.linear_core.weight.device)
         )
         self.decay_rate.requires_grad = learnable_decay_rate
-        dev = device if device is not None else DEVICE
-        self.rank_scale = nn.Parameter(
-            torch.full((rank,), 1.0, device=dev, dtype=dtype)
-        )
 
     def set_decay_rate_learnable(self, learnable: bool = True) -> None:
         self.decay_rate.requires_grad = learnable
@@ -169,6 +213,24 @@ class BaseMomentumLLU(BaseLLU):
         b = _activate(self.b_raw.expand_as(b_new), self.factor_activation)
         return a, b
 
+    def _update_g_shared_momentum(
+        self,
+        g_new: torch.Tensor,
+        detach: bool = False,
+    ) -> torch.Tensor:
+        if detach:
+            self.g_raw = self.g_raw.detach()
+
+        dims = tuple(range(g_new.ndim - 1))
+        if dims:
+            g_mean = g_new.mean(dim=dims)
+        else:
+            g_mean = g_new
+
+        self.g_raw = self.g_raw * self.local_decay_rate + g_mean
+        g = _activate(self.g_raw.expand_as(g_new), self.factor_activation)
+        return g
+
     def _update_batch_momentum(
         self,
         a_new: torch.Tensor,
@@ -183,3 +245,48 @@ class BaseMomentumLLU(BaseLLU):
         a = _activate(self.a_raw, self.factor_activation)
         b = _activate(self.b_raw, self.factor_activation)
         return a, b
+
+    def _update_g_batch_momentum(
+        self,
+        g_new: torch.Tensor,
+    ) -> torch.Tensor:
+        self.g_raw = _ensure_buffer_shape(self.g_raw, g_new)
+        self.g_raw = self.g_raw * self.local_decay_rate + g_new
+        g = _activate(self.g_raw, self.factor_activation)
+        return g
+
+    def _register_momentum_buffers(
+        self,
+        device: Optional[torch.device],
+        dtype: torch.dtype,
+        batch: bool = False,
+    ) -> None:
+        r"""_register_momentum_buffers(device, dtype, batch=False) -> None
+
+        Register the momentum factor buffers and SVD factors for the active
+        parameterization.  In ``"lora"`` mode the shared/batch ``a_raw``/``b_raw``
+        buffers are created (U/V stay ``None``); in ``"svd"`` mode ``g_raw`` is
+        created and the static U/V factors are built.
+        """
+        prefix: tuple[int, ...] = (1,) if batch else ()
+        if self.parameterization == "lora":
+            self.register_buffer(
+                "a_raw",
+                torch.zeros(*prefix, self.rank, self.out_features, device=device, dtype=dtype),
+                persistent=True,
+            )
+            self.register_buffer(
+                "b_raw",
+                torch.zeros(*prefix, self.rank, self.in_features, device=device, dtype=dtype),
+                persistent=True,
+            )
+            self.g_raw = None
+        else:
+            self.a_raw = None
+            self.b_raw = None
+            self.register_buffer(
+                "g_raw",
+                torch.zeros(*prefix, self.rank, device=device, dtype=dtype),
+                persistent=True,
+            )
+            self._create_svd_factors(device, dtype)

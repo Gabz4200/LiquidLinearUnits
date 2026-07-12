@@ -1,4 +1,4 @@
-r"""BatchMomentumLiquidLN: per-batch-element momentum."""
+r"""BatchMomentumLiquidLN: rank-R adaptive factors with per-batch-element momentum."""
 
 import torch
 import torch.nn as nn
@@ -8,31 +8,22 @@ from typing import Optional
 from .base import BaseMomentumLLU
 from .utils import (
     DEVICE,
+    _validate_parameterization,
 )
 
 
 class BatchMomentumLiquidLN(BaseMomentumLLU):
-    r"""Input-conditioned rank-:math:`R` update with per-batch-element momentum.
+    """Input-conditioned rank-R update with per-batch-element momentum.
 
-    Like :class:`SharedMomentumLiquidLN` but the momentum is tracked separately
-    for each element in the batch dimension.  The raw buffers have shape
-    ``(*batch, rank, feat)`` -- the batch dimensions are included and each
-    :math:`(b_1, \dots, b_n)` slice has its own state.
-
-    Because the buffer shape depends on the input, a runtime guard detects
-    shape/device/dtype mismatches and re-initialises the buffer when needed
-    (e.g. on batch-size changes).  This makes it slightly heavier than
-    :class:`SharedMomentumLiquidLN` but necessary when per-sample momentum
-    dynamics are required.
-
-    Zero-initialised so the adaptive path contributes nothing at step 1.
+    Supports both LoRA and SVD parameterizations. In SVD mode, applies momentum to
+    the dynamic scaling factor g.
     """
 
     def __init__(
         self,
         in_features: int,
         out_features: int,
-        decay_rate=0.4,
+        decay_rate: float = 0.4,
         rank: int = 4,
         hyper_hidden_dim: Optional[int] = None,
         bias: bool = True,
@@ -42,42 +33,14 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         normalize_input: bool = True,
         init_method: str = "hyperfan_in",
         learnable_decay_rate: bool = False,
+        parameterization: str = "lora",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, device=None, dtype=torch.float32) -> None
-
-        Args:
-            in_features (int): size of each input sample.
-            out_features (int): size of each output sample.
-            decay_rate (float): decay factor for the momentum buffers.
-                Values close to ``1`` give longer memory.  Default: ``0.4``.
-            rank (int): number of factor pairs :math:`(a_r, b_r)`.  Default: ``4``.
-            hyper_hidden_dim (int, optional): hidden dimension of the MLP
-                hypernetwork.  Default: ``None`` (``max(in_features // 4, rank * 16)``).
-            bias (bool): whether the core :class:`~nn.Linear` has a learnable bias.
-                Default: ``True``.
-            dynamic_bias (bool): if ``True``, an input-dependent bias from an
-                MLP is added to the output.  Default: ``False``.
-            factor_activation (str): activation for the factor vectors.
-                One of ``"tanh"``, ``"norm"``, ``"rmsnorm"``, or ``"none"``.
-                Default: ``"norm"``.
-            scale_init (float): initial value of the per-channel scalar multiplier
-                on the adaptive path.  Default: ``0.01``.
-            normalize_input (bool): if ``True``, apply RMSNorm to the conditioning
-                input before the hypernetwork.  Default: ``True``.
-            init_method (str): weight initialisation method for the hypernetwork.
-                One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
-                or ``"small"``.  Default: ``"hyperfan_in"``.
-            learnable_decay_rate (bool): if ``True``, the decay rate is a learnable
-                parameter (nn.Parameter). Default: ``False``.
-            device (torch.device, optional): the desired device of the parameters.
-                Default: ``None``.
-            dtype (torch.dtype): the desired data type of the parameters.
-                Default: ``torch.float32``.
+        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None
         """
-        if rank < 1:
-            raise ValueError(f"rank must be >= 1, got {rank}")
+        _validate_parameterization(parameterization)
+
         super().__init__(
             in_features=in_features,
             out_features=out_features,
@@ -94,21 +57,19 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         dev = device if device is not None else DEVICE
 
         self.normalize_input = normalize_input
+        self.parameterization = parameterization
 
-        # Placeholder buffer; real shape is set on first forward via the guard
-        self.register_buffer(
-            "a_raw", torch.zeros(1, rank, out_features, device=dev, dtype=dtype), persistent=True
-        )
-        self.register_buffer(
-            "b_raw", torch.zeros(1, rank, in_features, device=dev, dtype=dtype), persistent=True
-        )
+        # Placeholder buffers; real shape is set on first forward via ensure_buffer_shape
+        self._register_momentum_buffers(dev, dtype, batch=True)
 
         # MLP hypernetwork
         hidden_dim = hyper_hidden_dim or max(in_features // 4, rank * 16)
+        hyper_out_dim = rank if self.parameterization == "svd" else rank * (out_features + in_features)
+
         self.hypernetwork = nn.Sequential(
             nn.Linear(in_features, hidden_dim, device=dev, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, rank * (out_features + in_features), device=dev, dtype=dtype),
+            nn.Linear(hidden_dim, hyper_out_dim, device=dev, dtype=dtype),
         )
 
         # Dynamic bias with MLP
@@ -126,30 +87,15 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
 
     def _init_weights(self) -> None:
         r"""_init_weights() -> None
-
-        Initialise hypernetwork layers with the chosen init method, then zero the
-        b-section of the output layer so the adaptive path produces zero at step 1
-        while a-factors keep gradient flowing.
-
-        The dynamic bias MLP (if present) is small-initialised and its
-        final layer zeroed.
         """
-        self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
+        if self.parameterization == "lora":
+            self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
+        else:
+            self._init_svd_projection(self.hypernetwork)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         r"""forward(x, cond=None) -> Tensor
-
-        Args:
-            x (Tensor): input tensor of shape ``(..., in_features)``.
-            cond (Tensor, optional): optional conditioning tensor.  When
-                ``None``, *x* is used.  The conditioning drives the hypernetwork
-                while *x* always goes through the core linear path.
-
-        Returns:
-            Tensor: output tensor of shape ``(..., out_features)`` with
-            momentum-smoothed rank-:math:`R` adaptive update.
         """
-
         cond = cond if cond is not None else x
 
         # RMSNorm for magnitude invariance
@@ -159,16 +105,19 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
 
         raw = self.hypernetwork(h_in)
 
-        split = self.rank * self.out_features
+        if self.parameterization == "lora":
+            split = self.rank * self.out_features
+            a_new = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
+            b_new = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
 
-        a_new = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
-        b_new = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
+            a, b = self._update_batch_momentum(a_new, b_new)
+            adaptive = self._compute_low_rank_adaptive(a, b, x)
+        else:
+            # SVD Mode
+            g = self._update_g_batch_momentum(raw)
+            adaptive = self._compute_svd_adaptive(x, g)
 
-        a, b = self._update_batch_momentum(a_new, b_new)
-
-        adaptive = self._compute_low_rank_adaptive(a, b, x)
         out = core_out + adaptive
-
         out = self._apply_dynamic_bias(out, cond)
 
         return out
@@ -176,5 +125,6 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
     def extra_repr(self) -> str:
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
-            f"act={self.factor_activation}, norm_input={self.normalize_input}"
+            f"act={self.factor_activation}, norm_input={self.normalize_input}, "
+            f"mode={self.parameterization}"
         )
