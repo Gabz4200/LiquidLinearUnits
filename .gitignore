@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Training artifacts and checkpoints — never commit binaries or results
+*.pt
+bench_*.txt
+benchmark_report*.txt
+benchmark_report*.json
+llm_bench_report*.json
+llm_*_small*.json
+llm_*_eval.json
