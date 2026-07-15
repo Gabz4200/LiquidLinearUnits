@@ -22,7 +22,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from llu.models.gdn2 import GatedDeltaNet2
+from llu.models.gdn2.gdn2 import GatedDeltaNet2
 
 
 # =============================================================================

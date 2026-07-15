@@ -1,7 +1,7 @@
 import torch
 import pytest
 from typing import Any, cast
-from llu.models.gdn2 import GatedDeltaNet2
+from llu.models.gdn2.gdn2 import GatedDeltaNet2
 
 # =============================================================================
 # HAPPY PATHS
