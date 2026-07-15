@@ -1,5 +1,9 @@
 # LiquidLinearUnits
 
+> ⚠️ **DISCLAIMER 1:** This repository is yet another learning project made by a single Brazilian student that is exploring the topic of Liquid Linear Units and Adaptive Neural Networks.
+
+> ⚠️ **DISCLAIMER 2:** All the ideas behind what to do for this architecture are mine, but AI is still used in this project, mainly for those distinct tasks: commit message writing and automatic commit splitting, batch code writing for repetitive chores and helper routines. Parts of this README may be written by AI too as I usually ask it to compile information from the results of tests that I do. I also dont prohibit myself from ocasional help, but the main thing is probably commit messages, I genuinely hate writting those.
+
 A Very Small Test of a very simple concept that can actually be useful. Liquid in that case means that it is adaptable by the input, not a LNN in the traditional sense.
 
 ## The architectures
