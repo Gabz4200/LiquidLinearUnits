@@ -43,6 +43,7 @@ from .llns import (
     BatchMomentumLiquidLN,
     GDNLiquidLN,
     MomentumGDNLiquidLN,
+    CrossAttnLoraLN,
 )
 
 
@@ -60,6 +61,7 @@ ARCH_FACTORIES = {
     "GDNLiquidLN": GDNLiquidLN,
     "MomentumGDNLiquidLN": MomentumGDNLiquidLN,
     "StableGDNCondLiquidLN": StableLiquidLN,
+    "CrossAttnLoraLN": CrossAttnLoraLN,
 }
 
 # GDN-2 units: suitable for FFN positions, not for projection matrices.
@@ -71,6 +73,7 @@ _COND_LAYERS = (
     BatchMomentumLiquidLN,
     GDNLiquidLN,
     MomentumGDNLiquidLN,
+    CrossAttnLoraLN,
 )
 
 # Architectures that carry cross-step recurrence (delta-rule memory or momentum
@@ -118,11 +121,15 @@ def _llu_kwargs_for(
     learnable_decay: bool = False,
     layer_idx: int = 0,
     parameterization: str = "lora",
+    attn_dim: int = 32,
+    attn_heads: int = 2,
 ) -> dict:
     """Build a kwargs dict containing only the params ``cls.__init__`` accepts.
 
     Introspecting the constructor signature keeps the factory robust to the
-    differing parameter sets of the eight LLU variants.
+    differing parameter sets of the eight LLU variants. ``attn_dim`` /
+    ``attn_heads`` apply only to cross-attention-based units (e.g.
+    ``CrossAttnLoraLN``); they are silently skipped for others.
     """
     params = inspect.signature(cls.__init__).parameters
     kw: dict = {}
@@ -146,6 +153,10 @@ def _llu_kwargs_for(
         kw["dynamic_bias"] = False
     if "parameterization" in params:
         kw["parameterization"] = parameterization
+    if "attn_dim" in params:
+        kw["attn_dim"] = attn_dim
+    if "attn_heads" in params:
+        kw["attn_heads"] = attn_heads
     return kw
 
 
@@ -390,6 +401,8 @@ class LiquidTransformer(nn.Module):
         learnable_decay: bool = False,
         use_attention: bool = True,
         parameterization: str = "lora",
+        lln_attn_dim: int = 32,
+        lln_attn_heads: int = 2,
     ) -> None:
         super().__init__()
         if d_model % n_heads != 0:
@@ -402,8 +415,8 @@ class LiquidTransformer(nn.Module):
         proj_name, ffn_name = _arch_map(arch)
         proj_cls = ARCH_FACTORIES[proj_name]
         ffn_cls = ARCH_FACTORIES[ffn_name]
-        proj_kwargs = _llu_kwargs_for(proj_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization)
-        ffn_kwargs = _llu_kwargs_for(ffn_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization)
+        proj_kwargs = _llu_kwargs_for(proj_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization, attn_dim=lln_attn_dim, attn_heads=lln_attn_heads)
+        ffn_kwargs = _llu_kwargs_for(ffn_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization, attn_dim=lln_attn_dim, attn_heads=lln_attn_heads)
 
         # Optional GDN-2 cond provider (feeds `cond` to the StableLiquidLN FFN).
         # Its output is d_model-sized, so the FFN sublayers condition on a
@@ -481,6 +494,8 @@ def build_model(arch: str, d_model: int, out_dim: int, **overrides: Any) -> Liqu
         learnable_decay=False,
         use_attention=use_attention,
         parameterization="lora",
+        lln_attn_dim=32,
+        lln_attn_heads=2,
     )
     cfg.update(overrides)
     cfg["n_heads"] = _valid_n_heads(d_model, cfg.get("n_heads", 4))
