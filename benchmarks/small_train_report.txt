@@ -1,0 +1,38 @@
+========================================================================
+LIQUID LINEAR UNITS -- BENCHMARK REPORT
+generated : 2026-07-18 19:54:26
+device    : cpu
+------------------------------------------------------------------------
+GLOBAL CONFIG
+  archs        : StableGDNCondLiquidLN, StableLiquidLN, LiquidLinear
+  tasks        : overwrite_recall, permutation_S3
+  sweeps       : off
+  use_attention : True   ablate_attention : False
+  steps        : 600   batch : 32   eval_batch : 256
+  num_layers   : 4   window : 32   n_heads : 4
+  use_swiglu   : True   swiglu_mult : 4
+  rank         : 4   decay_rate : 0.4   lr : 0.001
+  seed         : 0   quick : False
+========================================================================
+
+------------------------------------------------------------------------
+TASK overwrite_recall
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+StableGDNCondLiquidLN              479456    0.8778     0.876 mse=0.876 success_rate=0    751.4   1.331
+StableLiquidLN                     479264    0.8692    0.9052 mse=0.905 success_rate=0    445.6   2.244
+LiquidLinear                       596064    0.1733    0.1619 mse=0.162 success_rate=0.844    231.4   4.321
+
+------------------------------------------------------------------------
+TASK permutation_S3
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+StableGDNCondLiquidLN              167490    0.5367    0.5482              acc=0.809    329.5   3.035
+StableLiquidLN                     166946    0.7883    0.7576              acc=0.719    202.5   4.939
+LiquidLinear                        32770    0.4812    0.3678              acc=0.867    84.47   11.84
+
+========================================================================
+END OF REPORT -- 6 runs
+========================================================================
