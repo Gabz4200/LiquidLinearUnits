@@ -1,0 +1,24 @@
+# Static (single-input / single-output) LLU benchmark
+generated: 2026-07-18T15:03:39
+config: hidden=32 n_layers=1 rank=4 param=lora act=relu train_frac=0.5 steps=15 lr=0.001 batch=64
+
+          task                     lln     params    tr_loss  tr_metric    te_loss  te_metric    best_te   ms/step    tot_s                 notes
+--------------  ----------------------  ---------  ---------  ---------  ---------  ---------  ---------  --------  -------  --------------------
+mod11_add  StableLiquidLN  29903     1.5362     0.6719     2.7892     0.0000     0.0164    6.5414   0.1000  
+mod11_add  RankRLiquidLN  11743     1.5636     0.6094     2.6762     0.0328     0.0656    3.8523   0.1000  
+mod11_add  SharedMomentumLiquidLN  29905     2.1397     0.3125     2.6054     0.0328     0.0820    5.5219   0.1000  
+mod11_add  BatchMomentumLiquidLN  29905     1.8256     0.4844     2.8547     0.0164     0.0164    5.8498   0.1000  
+mod11_mul  StableLiquidLN  29903     1.1559     0.8594     2.7322     0.0820     0.0820    5.7812   0.1000  
+mod11_mul  RankRLiquidLN  11743     1.6415     0.6250     2.5181     0.0656     0.0820    6.5174   0.1000  
+mod11_mul  SharedMomentumLiquidLN  29905     2.0029     0.2812     2.5480     0.0820     0.0820    9.0206   0.1000  
+mod11_mul  BatchMomentumLiquidLN  29905     1.7717     0.4219     2.6042     0.0984     0.1148    8.3242   0.1000  
+fourier_d1_f3  StableLiquidLN  19497     1.3749    -1.1726     1.3056    -1.1426    -1.1426    8.2527   0.2000  
+fourier_d1_f3  RankRLiquidLN  4717     1.4095    -1.1872     1.3584    -1.1655    -1.1655    6.8590   0.1000  
+fourier_d1_f3  SharedMomentumLiquidLN  19499     1.6546    -1.2863     1.5488    -1.2445    -1.2445    9.4260   0.2000  
+fourier_d1_f3  BatchMomentumLiquidLN  19499     1.6259    -1.2751     1.5116    -1.2295    -1.2295    9.1630   0.2000  
+parity_d20_k4  StableLiquidLN  26554     0.8151     0.5156     0.7875     0.4937     0.5098    8.3786   0.2000  
+parity_d20_k4  RankRLiquidLN  9594     0.8540     0.4375     0.7533     0.4902     0.5049    8.4923   0.2000  
+parity_d20_k4  SharedMomentumLiquidLN  26556     0.7331     0.4844     0.7229     0.5122     0.5210    7.2528   0.1000  
+parity_d20_k4  BatchMomentumLiquidLN  26556     0.7261     0.5469     0.7176     0.5103     0.5103    6.6302   0.1000  
+
+tr_metric / te_metric: accuracy for ce tasks, -RMSE for mse tasks (higher is better for both).

@@ -1,0 +1,16 @@
+# Static (single-input / single-output) LLU benchmark
+generated: 2026-07-18T15:31:30
+config: hidden=64 n_layers=2 rank=4 param=lora act=relu train_frac=0.5 steps=4000 lr=0.001 batch=256
+
+          task                     lln     params    tr_loss  tr_metric    te_loss  te_metric    best_te   ms/step    tot_s                 notes
+--------------  ----------------------  ---------  ---------  ---------  ---------  ---------  ---------  --------  -------  --------------------
+fourier_d1_f3  StableLiquidLN  79881     0.0000    -0.0039     0.0002    -0.0158    -0.0040   14.2198  57.4000  
+fourier_d1_f3  RankRLiquidLN  55053     0.0000    -0.0011     0.0000    -0.0013    -0.0010   12.9886  52.5000  
+fourier_d1_f3  SharedMomentumLiquidLN  79884     0.0010    -0.0313     0.0013    -0.0355    -0.0274   15.2229  61.5000  
+fourier_d1_f3  BatchMomentumLiquidLN  79884     0.0002    -0.0137     0.0003    -0.0170    -0.0170   15.1596  61.3000  
+parity_d20_k4  StableLiquidLN  87578     0.0000     1.0000     0.0751     0.9863     0.9863   15.3696  62.1000  
+parity_d20_k4  RankRLiquidLN  63130     0.0000     1.0000     0.0202     0.9976     0.9980   13.5003  54.6000  
+parity_d20_k4  SharedMomentumLiquidLN  87581     0.0001     1.0000     0.0002     1.0000     1.0000   16.1456  65.2000  
+parity_d20_k4  BatchMomentumLiquidLN  87581     0.0001     1.0000     0.0000     1.0000     1.0000   16.0650  64.9000  
+
+tr_metric / te_metric: accuracy for ce tasks, -RMSE for mse tasks (higher is better for both).

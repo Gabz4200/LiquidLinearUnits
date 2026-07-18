@@ -1,0 +1,61 @@
+========================================================================
+LIQUID LINEAR UNITS -- SYNTHETIC SEQUENCE BENCHMARK
+generated : 2026-07-18 (CPU run, i5-8250U, torch CPU)
+device    : cpu
+------------------------------------------------------------------------
+GLOBAL CONFIG
+  archs        : StableLiquidLN,RankRLiquidLN,SharedMomentumLiquidLN,BatchMomentumLiquidLN
+  tasks        : induction_heads,overwrite_recall,correlated_key,capacity
+  sweeps       : off
+  use_attention : True   ablate_attention : False
+  steps        : 150   batch : 32   eval_batch : 256
+  num_layers   : 1   window : 16   n_heads : 4
+  use_swiglu   : True   swiglu_mult : 4
+  rank         : 4   decay_rate : 0.4   lr : 0.001
+  lln_attn_dim : 32   lln_attn_heads : 2
+  seed         : 0   quick : False
+========================================================================
+
+------------------------------------------------------------------------
+TASK induction_heads
+------------------------------------------------------------------------
+arch                           params   tr_loss    ev_loss                  metric                 ms/step    st/s
+------------------------------------------------------------------------
+StableLiquidLN                 248960     3.568      3.683 acc=0.0117                           430.4
+RankRLiquidLN                  195264     3.572      3.502 acc=0.0508                           382.9
+SharedMomentumLiquidLN         248967     3.498      3.494 acc=0.043                           501.8
+BatchMomentumLiquidLN          248967     3.48       3.556 acc=0.0508                          471.2
+
+------------------------------------------------------------------------
+TASK overwrite_recall
+------------------------------------------------------------------------
+arch                           params   tr_loss    ev_loss                  metric                 ms/step    st/s
+------------------------------------------------------------------------
+StableLiquidLN                 125663    0.9717     1.011 mse=1.01 success_rate=0                126.2
+RankRLiquidLN                   58167    0.9832     1.042 mse=1.04 success_rate=0                110.4
+SharedMomentumLiquidLN         125670    0.8755     0.967 mse=0.967 success_rate=0              144.4
+BatchMomentumLiquidLN          125670    0.8571     1.005 mse=1 success_rate=0                  133.5
+
+------------------------------------------------------------------------
+TASK correlated_key
+------------------------------------------------------------------------
+arch                           params   tr_loss    ev_loss                  metric                 ms/step    st/s
+------------------------------------------------------------------------
+StableLiquidLN                 125663    1.022      0.9977 mse=0.998 success_rate=0              126.1
+RankRLiquidLN                   58167    1.087      1.079 mse=1.08 success_rate=0                113.6
+SharedMomentumLiquidLN         125670    0.9665     0.9478 mse=0.948 success_rate=0             146.8
+BatchMomentumLiquidLN          125670    1.009      0.9908 mse=0.991 success_rate=0             135.7
+
+------------------------------------------------------------------------
+TASK capacity
+------------------------------------------------------------------------
+arch                           params   tr_loss    ev_loss                  metric                 ms/step    st/s
+------------------------------------------------------------------------
+StableLiquidLN                 125663    1.118      0.9875 mse=0.988 success_rate=0              124.0
+RankRLiquidLN                   58167    1.134      0.9751 mse=0.975 success_rate=0              111.0
+SharedMomentumLiquidLN         125670    1.104      0.9463 mse=0.946 success_rate=0             144.1
+BatchMomentumLiquidLN          125670    1.113      0.9458 mse=0.946 success_rate=0             134.8
+
+========================================================================
+END OF REPORT -- 16 runs
+========================================================================
