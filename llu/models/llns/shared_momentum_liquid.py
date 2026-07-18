@@ -23,6 +23,7 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
         self,
         in_features: int,
         out_features: int,
+        cond_dim: Optional[int] = None,
         decay_rate: float = 0.4,
         rank: int = 4,
         hyper_hidden_dim: Optional[int] = None,
@@ -37,7 +38,7 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, cond_dim=None, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None
         """
         _validate_parameterization(parameterization)
 
@@ -58,16 +59,20 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
 
         self.normalize_input = normalize_input
         self.parameterization = parameterization
+        # Separate conditioning-stream dimension. Defaults to in_features so the
+        # default (cond == x) behaviour is unchanged; the LLM intermediary passes
+        # a GDN-2 stream of a different size via cond_dim.
+        self.cond_dim = cond_dim if cond_dim is not None else in_features
 
         # Registers dynamic factor buffers based on mode
         self._register_momentum_buffers(dev, dtype)
 
         # MLP hypernetwork
-        hidden_dim = hyper_hidden_dim or max(in_features // 4, rank * 16)
+        hidden_dim = hyper_hidden_dim or max(self.cond_dim // 4, rank * 16)
         hyper_out_dim = rank if self.parameterization == "svd" else rank * (out_features + in_features)
 
         self.hypernetwork = nn.Sequential(
-            nn.Linear(in_features, hidden_dim, device=dev, dtype=dtype),
+            nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
             nn.SiLU(),
             nn.Linear(hidden_dim, hyper_out_dim, device=dev, dtype=dtype),
         )
@@ -75,7 +80,7 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
         # Dynamic bias with MLP
         self.bias_dynamic: Optional[nn.Sequential] = (
             nn.Sequential(
-                nn.Linear(in_features, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
                 nn.Linear(hidden_dim, out_features, device=dev, dtype=dtype),
             )
@@ -98,8 +103,8 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
         """
         cond = cond if cond is not None else x
 
-        # RMSNorm for magnitude invariance
-        h_in = F.rms_norm(cond, (self.in_features,)) if self.normalize_input else cond
+        # RMSNorm for magnitude invariance (over the conditioning dim)
+        h_in = F.rms_norm(cond, (self.cond_dim,)) if self.normalize_input else cond
 
         core_out = self.linear_core(x)
 
@@ -114,11 +119,11 @@ class SharedMomentumLiquidLN(BaseMomentumLLU):
                 *h_in.shape[:-1], self.rank, self.in_features
             )
 
-            a, b = self._update_shared_momentum(a_new, b_new)
+            a, b = self._update_shared_momentum(a_new, b_new, detach=True)
             adaptive = self._compute_low_rank_adaptive(a, b, x)
         else:
             # SVD Mode
-            g = self._update_g_shared_momentum(raw)
+            g = self._update_g_shared_momentum(raw, detach=True)
             adaptive = self._compute_svd_adaptive(x, g)
 
         out = core_out + adaptive

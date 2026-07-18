@@ -236,8 +236,8 @@ class BaseMomentumLLU(BaseLLU):
         a_new: torch.Tensor,
         b_new: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.a_raw = _ensure_buffer_shape(self.a_raw, a_new)
-        self.b_raw = _ensure_buffer_shape(self.b_raw, b_new)
+        self.a_raw = _ensure_buffer_shape(self.a_raw, a_new).detach()
+        self.b_raw = _ensure_buffer_shape(self.b_raw, b_new).detach()
 
         self.a_raw = self.a_raw * self.local_decay_rate + a_new
         self.b_raw = self.b_raw * self.local_decay_rate + b_new
@@ -250,7 +250,7 @@ class BaseMomentumLLU(BaseLLU):
         self,
         g_new: torch.Tensor,
     ) -> torch.Tensor:
-        self.g_raw = _ensure_buffer_shape(self.g_raw, g_new)
+        self.g_raw = _ensure_buffer_shape(self.g_raw, g_new).detach()
         self.g_raw = self.g_raw * self.local_decay_rate + g_new
         g = _activate(self.g_raw, self.factor_activation)
         return g
