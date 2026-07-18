@@ -1,21 +1,33 @@
 #!/usr/bin/env python
-r"""Training + benchmarking pipeline for the Liquid Linear Unit architectures.
+r"""Synthetic sequence benchmark for the non-LLM Liquid Transformer models.
 
-Runs every architecture from :mod:`llu.models.llns` (wrapped in
-:class:`llu.models.liquid_model.LiquidTransformer`) across the synthetic
-benchmark tasks, collects quality / loss / speed / parameter metrics, and
-writes a readable text report.
+Drives :class:`llu.models.liquid_model.LiquidTransformer` (every ``nn.Linear``
+replaced by an LLU from :mod:`llu.models.llns`) across the mechanism-
+probing synthetic tasks in :mod:`bench_tasks`, and writes a readable report.
+
+This is the cheap "does this architecture have a fundamental capacity /
+gating flaw?" screen before committing compute to a full LLM run:
+
+* ``overwrite_recall`` / ``capacity`` (MQAR family) -- fixed-state recall
+  bottleneck: where linear/gated-linear attention degrades as (#KV) / state.
+* ``needle`` -- decay-by-time vs decay-by-relevance at distance.
+* ``selective_copy`` -- content-based gating (ignore distractors).
+* ``induction_heads`` -- canary: must converge fast or something is broken.
+* ``permutation_S3`` / ``permutation_S5`` -- state tracking beyond flat
+  recall (delta-rule expressivity).
+* ``xor`` / ``in_context_regression`` -- non-linear / in-context learning.
+
+All sequences are generated on the fly (no downloads). Deterministic given
+``--seed`` and the per-task/sweep data seed.
 
 Usage
 -----
-    python scripts/train.py                      # full matrix (slow on CPU)
-    python scripts/train.py --quick              # tiny smoke configuration
-    python scripts/train.py --tasks overwrite_recall --archs SharedMomentumLiquidLN
-    python scripts/train.py --no-sweeps          # one config per task, no sweeps
-
-All sequences are generated on the fly (no downloads). Every run is fully
-deterministic given ``--seed`` and the per-task/sweep data seed, and the data
-is identical across architectures for a fair comparison.
+    python scripts/train_synth.py                       # full matrix (slow)
+    python scripts/train_synth.py --quick                 # tiny smoke
+    python scripts/train_synth.py --archs StableLiquidLN CrossAttnLoraLN
+    python scripts/train_synth.py --tasks overwrite_recall needle
+    python scripts/train_synth.py --no-sweeps            # one config/task
+    python scripts/train_synth.py --ablate_attention    # arch vs arch_noattn
 """
 
 from __future__ import annotations
@@ -27,13 +39,18 @@ import sys
 import time
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import numpy as np
 import torch
 
-from llu.models.liquid_model import build_model, ARCH_FACTORIES, is_valid_arch, RECURRENT_ARCHS
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from llu.models.liquid_model import (
+    build_model,
+    ARCH_FACTORIES,
+    is_valid_arch,
+    RECURRENT_ARCHS,
+)
 from bench_tasks import TASKS, make_task, loss_fn, compute_metric
 
 ALL_ARCHS = list(ARCH_FACTORIES.keys())
@@ -127,12 +144,11 @@ def _fmt(v, w, kind="f"):
         return f"{v:{w}.4g}"
     return f"{str(v):>{w}}"
 
-
 def write_report(results: list[dict], cfg: dict, path: str) -> None:
     lines: list[str] = []
     A = lines.append
     A("=" * 72)
-    A("LIQUID LINEAR UNITS -- BENCHMARK REPORT")
+    A("LIQUID LINEAR UNITS -- SYNTHETIC SEQUENCE BENCHMARK")
     A(f"generated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     A(f"device    : {cfg['device']}")
     A("-" * 72)
@@ -145,11 +161,11 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
     A(f"  num_layers   : {cfg['num_layers']}   window : {cfg['window']}   n_heads : {cfg['n_heads']}")
     A(f"  use_swiglu   : {cfg['use_swiglu']}   swiglu_mult : {cfg['swiglu_mult']}")
     A(f"  rank         : {cfg['rank']}   decay_rate : {cfg['decay_rate']}   lr : {cfg['lr']}")
+    A(f"  lln_attn_dim : {cfg['lln_attn_dim']}   lln_attn_heads : {cfg['lln_attn_heads']}")
     A(f"  seed         : {cfg['seed']}   quick : {cfg['quick']}")
     A("=" * 72)
     A("")
 
-    # Group results by task (and sweep label).
     by_task: dict[str, list[dict]] = {}
     for r in results:
         by_task.setdefault(r["task"], []).append(r)
@@ -163,7 +179,6 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
         A(hdr)
         A("-" * 72)
         for r in rows:
-            # Full metric string: key=value (never clipped).
             m = r["metric"]
             mstr = " ".join(f"{k}={v:.3g}" for k, v in m.items()) if m else "-"
             if r["ceiling"]:
@@ -188,7 +203,7 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def parse_args() -> dict:
-    p = argparse.ArgumentParser(description="LLU architecture benchmark")
+    p = argparse.ArgumentParser(description="LLU synthetic sequence benchmark")
     p.add_argument("--archs", default=",".join(ALL_ARCHS),
                    help="comma-separated architectures")
     p.add_argument("--tasks", default=",".join(TASKS.keys()),
@@ -213,7 +228,7 @@ def parse_args() -> dict:
     p.add_argument("--eval_batch", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu")
-    p.add_argument("--out", default="benchmark_report.txt")
+    p.add_argument("--out", default="synth_bench_report.txt")
     p.add_argument("--sweeps", dest="sweeps", action="store_true", default=True)
     p.add_argument("--no_sweeps", dest="sweeps", action="store_false")
     p.add_argument("--parameterization", default="lora", choices=["lora", "svd"],
@@ -263,7 +278,6 @@ def main() -> None:
         if task_name not in TASKS:
             print(f"[skip] unknown task {task_name}")
             continue
-        # Base task instance just to read token_dim / out_dim / sweep.
         base_task = make_task(task_name)
         sweeps = base_task.sweep() if cfg["sweeps"] else [{}]
         for sweep in sweeps:
@@ -271,7 +285,6 @@ def main() -> None:
             sweep_label = ",".join(f"{k}={v}" for k, v in sweep.items())
             d_model = cfg["d_model_override"] or task.token_dim
             out_dim = task.out_dim
-            # Deterministic, architecture-independent data seed for this task+sweep.
             data_seed = (abs(hash((task_name, tuple(sorted(sweep.items()))))) % (2 ** 31))
             print(f"\n=== TASK {task_name}  sweep=[{sweep_label}]  d_model={d_model} out_dim={out_dim} ===")
             for arch in cfg["archs"]:

@@ -406,6 +406,82 @@ class PermutationComposition(SyntheticTask):
         return (torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(mask))
 
 
+class SelectiveCopy(SyntheticTask):
+    """Copy only the *marked* tokens, ignoring distractors (content gating).
+
+    Each position carries a one-hot token plus a marker bit. Positions whose
+    marker is set are "relevant"; the model must reconstruct those tokens at
+    their own positions and ignore everything else. The loss is masked to the
+    relevant positions only, so a model that merely copies the whole stream
+    scores perfectly on distractor positions only by ignoring them. Separates
+    content-based gating (GDN-2 / RWKV-7 input-dependent decay) from
+    vanilla linear attention.
+    """
+
+    def __init__(self, T: int = 16, n_rel: int = 4, V: int = 16):
+        self.T = T
+        self.n_rel = n_rel
+        self.V = V
+        self.token_dim = V + 1   # one-hot token + marker
+        self.out_dim = V
+        self.loss_type = "ce"
+
+    def generate(self, B, rng):
+        T, n_rel, V = self.T, self.n_rel, self.V
+        x = np.zeros((B, T, self.token_dim), dtype=np.float32)
+        y = np.zeros((B, T), dtype=np.int64)
+        mask = np.zeros((B, T), dtype=bool)
+        for b in range(B):
+            rel = set(rng.choice(T, size=n_rel, replace=False).tolist())
+            for t in range(T):
+                tok = rng.integers(V)
+                x[b, t, tok] = 1.0
+                if t in rel:
+                    x[b, t, V] = 1.0   # marker bit
+                    y[b, t] = tok
+                    mask[b, t] = True
+        return (torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(mask))
+
+    def sweep(self):
+        return [{"n_rel": v} for v in (2, 4, 8)]
+
+
+class InductionHeads(SyntheticTask):
+    """Induction-heads probe: [A] [B] ... [A] -> predict B.
+
+    A random token is duplicated at the final (query) position; the target is
+    the token that originally followed the first occurrence. Cheap, fast to
+    converge; a canary for whether the architecture is wired correctly.
+    """
+
+    def __init__(self, T: int = 32, V: int = 32):
+        self.T = T
+        self.V = V
+        self.token_dim = V
+        self.out_dim = V
+        self.loss_type = "ce"
+
+    def generate(self, B, rng):
+        T, V = self.T, self.V
+        x = np.zeros((B, T, V), dtype=np.float32)
+        y = np.zeros((B, T), dtype=np.int64)
+        mask = np.zeros((B, T), dtype=bool)
+        for b in range(B):
+            toks = rng.integers(0, V, size=T - 1)
+            k = int(rng.integers(max(1, T - 3)))
+            for i in range(T - 1):
+                x[b, i, int(toks[i])] = 1.0
+            q = int(toks[k])
+            x[b, T - 1, q] = 1.0          # query = duplicate of toks[k]
+            y[b, T - 1] = int(toks[k + 1])  # value that followed it
+            mask[b, T - 1] = True
+        return (torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(mask))
+
+
+    def sweep(self):
+        return [{"T": v} for v in (16, 32, 64)]
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -419,6 +495,8 @@ TASKS: dict[str, type] = {
     "in_context_regression": InContextLinearRegression,
     "permutation_S3": lambda **kw: PermutationComposition(n=3, **kw),
     "permutation_S5": lambda **kw: PermutationComposition(n=5, **kw),
+    "selective_copy": SelectiveCopy,
+    "induction_heads": InductionHeads,
 }
 
 # Default constructor params per task (overridable by CLI / sweeps).
@@ -431,6 +509,8 @@ TASK_DEFAULTS: dict[str, dict] = {
     "in_context_regression": dict(n_pairs=8, x_dim=4),
     "permutation_S3": dict(n_perms=4),
     "permutation_S5": dict(n_perms=4),
+    "selective_copy": dict(T=16, n_rel=4, V=16),
+    "induction_heads": dict(T=32, V=32),
 }
 
 
@@ -441,7 +521,8 @@ def make_task(name: str, overrides: Optional[dict] = None) -> SyntheticTask:
     if cls is PermutationComposition:
         return cls(**base)
     if cls.__name__ in ("OverwriteRecall", "CorrelatedKeyRecall", "CapacitySweep",
-                        "NeedleInHaystack", "XORNonlinear", "InContextLinearRegression"):
+                        "NeedleInHaystack", "XORNonlinear", "InContextLinearRegression",
+                        "SelectiveCopy", "InductionHeads"):
         return cls(**base)
     return cls(**base)
 
