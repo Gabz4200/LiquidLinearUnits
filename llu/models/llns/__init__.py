@@ -6,6 +6,7 @@ from .shared_momentum_liquid import SharedMomentumLiquidLN
 from .batch_momentum_liquid import BatchMomentumLiquidLN
 from .gdn_liquid import GDNLiquidLN
 from .momentum_gdn_liquid import MomentumGDNLiquidLN
+from .cross_attn_lora import CrossAttnLoraLN
 
 __all__ = [
     "LiquidLinear",
@@ -16,4 +17,5 @@ __all__ = [
     "BatchMomentumLiquidLN",
     "GDNLiquidLN",
     "MomentumGDNLiquidLN",
+    "CrossAttnLoraLN",
 ]
