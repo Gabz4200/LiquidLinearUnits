@@ -26,13 +26,76 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import inspect
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .gdn2 import GatedDeltaNet2
-from .llns import StableLiquidLN
+from .llns import (
+    StableLiquidLN,
+    CrossAttnLoraLN,
+    SharedMomentumLiquidLN,
+    BatchMomentumLiquidLN,
+)
+
+# Intermediary LLN classes that can sit between the SWA/X mixer and the
+# main residual stream in ``LiquidGDNCondBlock``. Every entry here accepts a
+# separate ``cond`` tensor (the GDN-2 conditioning stream) and is parameterised
+# by ``rank`` / ``parameterization`` so it can run as a learned low-rank update:
+#
+# * ``StableLiquidLN``      -- input-adaptive hypernetwork factors (the original).
+# * ``CrossAttnLoraLN``     -- LoRA-style factors refined by cross-attention over
+#                              the ``cond`` sequence (the novel option).
+# * ``SharedMomentumLiquidLN``   -- factors with an EMA momentum over the batch.
+# * ``BatchMomentumLiquidLN``    -- factors with a per-batch-element momentum.
+#
+# ``RankRLiquidLN`` is deliberately excluded: it has no ``cond`` port, so it
+# cannot act as the intermediary. The two GDN-2 LLUs (``GDNLiquidLN`` /
+# ``MomentumGDNLiquidLN``) are also excluded because the ``ours`` block already
+# produces ``cond`` via a GDN-2 recurrence -- stacking a second GDN-2 inside the
+# intermediary would be redundant and ~5x slower/step.
+LLN_REGISTRY = {
+    "StableLiquidLN": StableLiquidLN,
+    "CrossAttnLoraLN": CrossAttnLoraLN,
+    "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
+    "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
+}
+
+def _lln_kwargs_for(
+    cls: type,
+    *,
+    rank: int,
+    cond_dim: int,
+    parameterization: str,
+    normalize_input: bool,
+    factor_activation: str,
+    attn_dim: int,
+    attn_heads: int,
+    decay_rate: float = 0.4,
+    learnable_decay_rate: bool = False,
+) -> dict:
+    """Forward only the kwargs ``cls.__init__`` accepts.
+
+    Keeps ``IntermediaryMLP`` robust across LLN variants: ``StableLiquidLN``
+    ignores ``attn_dim``/``attn_heads``/``decay_rate``; ``CrossAttnLoraLN``
+    consumes the attention kwargs; the momentum variants consume ``decay_rate``.
+    Every candidate kwarg is dropped unless the class declares it.
+    """
+    params = set(inspect.signature(cls.__init__).parameters)
+    cand = dict(
+        rank=rank,
+        cond_dim=cond_dim,
+        parameterization=parameterization,
+        normalize_input=normalize_input,
+        factor_activation=factor_activation,
+        attn_dim=attn_dim,
+        attn_heads=attn_heads,
+        decay_rate=decay_rate,
+        learnable_decay_rate=learnable_decay_rate,
+    )
+    return {k: v for k, v in cand.items() if k in params}
 
 
 # ---------------------------------------------------------------------------
@@ -117,30 +180,41 @@ class SlidingWindowAttention(nn.Module):
 
 
 class IntermediaryMLP(nn.Module):
-    """Intermediary StableLiquidLN MLP.
+    """Intermediary liquid MLP sitting between the SWA/X mixer and the residual.
 
-    ``X`` (from SWA) flows through two StableLiquidLN layers; each is
-    conditioned on a *separate* linear projection of the GDN-2 ``cond``. This
-    is where the liquid (input-adaptive) factors do the heavy lifting between
-    the mixing phase and the main residual stream.
+    ``X`` (from SWA) flows through two LLN layers (``lln_cls``); each is
+    conditioned on a *separate* linear projection of the GDN-2 ``cond``. The
+    LLN does the input-adaptive heavy lifting. ``lln_cls`` is configurable
+    (``StableLiquidLN`` by default, ``CrossAttnLoraLN`` to refine factors via
+    cross-attention over the ``cond`` sequence). Only the kwargs each LLN
+    accepts are forwarded.
     """
 
-    def __init__(self, d_model: int, inter_dim: int, cond_dim: int, rank: int, parameterization: str = "svd") -> None:
+    def __init__(
+        self,
+        d_model: int,
+        inter_dim: int,
+        cond_dim: int,
+        rank: int,
+        parameterization: str = "svd",
+        lln_cls: type = StableLiquidLN,
+        attn_dim: int = 32,
+        attn_heads: int = 2,
+    ) -> None:
         super().__init__()
         self.proj1 = nn.Linear(cond_dim, cond_dim, bias=False)
         self.proj2 = nn.Linear(cond_dim, cond_dim, bias=False)
         # X and Cond may have different dims: in_features varies per layer,
-        # cond_dim is fixed (the GDN-2 output size). StableLiquidLN already
-        # decouples the two via its `cond_dim` argument.
-        self.sl1 = StableLiquidLN(
-            d_model, inter_dim, rank=rank, cond_dim=cond_dim, normalize_input=False,
-            parameterization=parameterization
+        # cond_dim is fixed (the GDN-2 output size). StableLiquidLN and
+        # CrossAttnLoraLN both decouple the two via their `cond_dim` argument.
+        lln_kwargs = _lln_kwargs_for(
+            lln_cls, rank=rank, cond_dim=cond_dim,
+            parameterization=parameterization, normalize_input=False,
+            factor_activation="norm", attn_dim=attn_dim, attn_heads=attn_heads,
         )
+        self.sl1 = lln_cls(d_model, inter_dim, **lln_kwargs)
         self.act = nn.SiLU()
-        self.sl2 = StableLiquidLN(
-            inter_dim, d_model, rank=rank, cond_dim=cond_dim, normalize_input=False,
-            parameterization=parameterization
-        )
+        self.sl2 = lln_cls(inter_dim, d_model, **lln_kwargs)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         c1 = self.proj1(cond)
@@ -156,7 +230,12 @@ class IntermediaryMLP(nn.Module):
 # ---------------------------------------------------------------------------
 
 class LiquidGDNCondBlock(nn.Module):
-    """SWA (X) + GDN-2 (cond) -> Intermediary StableLiquidLN MLP -> residual."""
+    """SWA (X) + GDN-2 (cond) -> Intermediary liquid MLP -> residual.
+
+    The intermediary MLP class is configurable (``cfg.lln``): ``StableLiquidLN``
+    (input-adaptive factors) or ``CrossAttnLoraLN`` (factors refined by
+    cross-attention over the GDN-2 ``cond`` sequence).
+    """
 
     def __init__(self, cfg: "LLMConfig") -> None:
         super().__init__()
@@ -170,7 +249,11 @@ class LiquidGDNCondBlock(nn.Module):
             hidden_size=d, expand_v=cfg.gdn_expand_v,
             head_dim=d // H, num_heads=H, mode="chunk",
         )
-        self.inter = IntermediaryMLP(d, inter, d, cfg.rank, parameterization=cfg.parameterization)
+        lln_cls = LLN_REGISTRY[cfg.lln]
+        self.inter = IntermediaryMLP(
+            d, inter, d, cfg.rank, parameterization=cfg.parameterization,
+            lln_cls=lln_cls, attn_dim=cfg.lln_attn_dim, attn_heads=cfg.lln_attn_heads,
+        )
         self.norm2 = None if self.parallel else nn.RMSNorm(d)
         self.mlp = SwiGLU(d, cfg.swiglu_mult)
 
@@ -231,7 +314,12 @@ class GDN2BaselineBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class LiquidGDNCondLLM(nn.Module):
-    """Our architecture: SWA + GDN-2-conditioned StableLiquidLN intermediary MLP."""
+    """Our architecture: SWA + GDN-2-conditioned liquid intermediary MLP.
+
+    The intermediary LLN is configurable via ``cfg.lln`` (``StableLiquidLN``
+    by default; pass ``CrossAttnLoraLN`` to refine the factors with
+    cross-attention over the GDN-2 conditioning stream).
+    """
 
     def __init__(self, cfg: "LLMConfig") -> None:
         super().__init__()
@@ -312,13 +400,21 @@ class LLMConfig:
     parallel_residual: bool = True   # GPT-NeoX parallel residual
     tie_embed: bool = True           # tie wte/lm_head (saves params)
     parameterization: str = "svd"    # "lora" | "svd"
+    lln: str = "StableLiquidLN"       # intermediary LLN class name
+    lln_attn_dim: int = 32           # CrossAttnLoraLN cross-attn dim
+    lln_attn_heads: int = 2          # CrossAttnLoraLN cross-attn heads
 
     # Preset budgets, per architecture. The baseline (GDN-2 mixer, no
     # attention) is cheaper per layer than ``ours`` (which also pays for SWA +
     # the two StableLiquidLN intermediary layers), so it gets more layers to
-    # land at the same total parameter budget. 0.5B is for GPU-class hardware;
-    # on this CPU the small preset is the realistic 2h target.
+    # land at the same total parameter budget.
+    #
+    # ``tiny`` is sized for a weak laptop CPU (i5-8250U, ~7.6 GB RAM, no CUDA):
+    # a full LLN comparison across 4 variants fits in a few minutes and a few
+    # hundred MB. ``small``/``medium``/``0.5B`` are for GPU-class hardware.
     PRESETS = {
+        "tiny":    {"ours": dict(n_layer=2,  n_embd=128),
+                    "baseline": dict(n_layer=4, n_embd=128)},
         "small":  {"ours": dict(n_layer=8,  n_embd=320),
                   "baseline": dict(n_layer=24, n_embd=320)},
         "medium": {"ours": dict(n_layer=12, n_embd=512),
@@ -337,9 +433,10 @@ class LLMConfig:
         return cfg
 
 
-def build_llm(variant: str = "ours", preset: str = "small", **overrides: Any) -> nn.Module:
+def build_llm(variant: str = "ours", preset: str = "small", lln: str = "StableLiquidLN", **overrides: Any) -> nn.Module:
     """Build an LLM of the requested variant at a shared parameter budget."""
     overrides.setdefault("variant", variant)
+    overrides["lln"] = lln
     cfg = LLMConfig.from_preset(preset, **overrides)
     model = LiquidGDNCondLLM(cfg) if variant == "ours" else GDN2BaselineLLM(cfg)
     return model
@@ -351,6 +448,7 @@ def num_params(model: nn.Module) -> int:
 
 __all__ = [
     "LLMConfig",
+    "LLN_REGISTRY",
     "LiquidGDNCondLLM",
     "GDN2BaselineLLM",
     "build_llm",
