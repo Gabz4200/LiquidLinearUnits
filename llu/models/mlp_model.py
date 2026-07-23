@@ -22,9 +22,11 @@ import torch.nn as nn
 
 from .llns import (
     StableLiquidLN,
+    FactorizedLiquidLN,
     RankRLiquidLN,
     SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
+    FactorizedBatchMomentumLiquidLN,
 )
 
 # Plain LLU variants that make sense as static linear maps. ``CrossAttnLoraLN``
@@ -33,14 +35,23 @@ from .llns import (
 # apply to a stateless vector map.
 IO_LLN_REGISTRY = {
     "StableLiquidLN": StableLiquidLN,
+    "FactorizedLiquidLN": FactorizedLiquidLN,
     "RankRLiquidLN": RankRLiquidLN,
     "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
     "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
+    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
 }
 
 
-def _lln_kwargs(cls: type, *, in_f: int, out_f: int, rank: int,
-                parameterization: str, normalize_input: bool = True) -> dict:
+def _lln_kwargs(
+    cls: type,
+    *,
+    in_f: int,
+    out_f: int,
+    rank: int,
+    parameterization: str,
+    normalize_input: bool = True,
+) -> dict:
     """Build kwargs for an LLU layer, forwarding only params the class accepts."""
     params = set(inspect.signature(cls.__init__).parameters)
     kw: dict = {"in_features": in_f, "out_features": out_f}
@@ -79,10 +90,17 @@ class LiquidMLP(nn.Module):
         act: nonlinearity between hidden layers (none after the final layer).
     """
 
-    def __init__(self, in_dim: int, hidden: int = 128, n_layers: int = 2,
-                 out_dim: int = 1, lln_cls: type = StableLiquidLN,
-                 parameterization: str = "lora", rank: int = 4,
-                 act: str = "relu") -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        hidden: int = 128,
+        n_layers: int = 2,
+        out_dim: int = 1,
+        lln_cls: type = StableLiquidLN,
+        parameterization: str = "lora",
+        rank: int = 4,
+        act: str = "relu",
+    ) -> None:
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be >= 1")
@@ -94,13 +112,20 @@ class LiquidMLP(nn.Module):
         self.n_layers = n_layers
         self.act = _ACTS[act]
         dims = [in_dim] + [hidden] * n_layers + [out_dim]
-        self.layers = nn.ModuleList([
-            lln_cls(**_lln_kwargs(
-                lln_cls, in_f=dims[i], out_f=dims[i + 1],
-                rank=rank, parameterization=parameterization,
-            ))
-            for i in range(len(dims) - 1)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                lln_cls(
+                    **_lln_kwargs(
+                        lln_cls,
+                        in_f=dims[i],
+                        out_f=dims[i + 1],
+                        rank=rank,
+                        parameterization=parameterization,
+                    )
+                )
+                for i in range(len(dims) - 1)
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for i, layer in enumerate(self.layers):

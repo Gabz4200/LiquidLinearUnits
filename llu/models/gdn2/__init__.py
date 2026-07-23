@@ -67,3 +67,8 @@ def _make_gated_delta_net2(*args: object, **kwargs: object) -> object:
 
 # Public constructor: GPU backend when possible, CPU otherwise.
 GatedDeltaNet2 = _make_gated_delta_net2
+"""Factory function that returns a GDN-2 layer (GPU or CPU).
+
+Note: ``GatedDeltaNet2`` is a *factory*, not a class.  ``isinstance(x, GatedDeltaNet2)``
+will not work; use ``hasattr(x, 'forward')`` or check the concrete type instead.
+"""

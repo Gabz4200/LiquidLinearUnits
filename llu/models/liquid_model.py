@@ -39,8 +39,10 @@ from .llns import (
     Rank1LiquidLN,
     RankRLiquidLN,
     StableLiquidLN,
+    FactorizedLiquidLN,
     SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
+    FactorizedBatchMomentumLiquidLN,
     GDNLiquidLN,
     MomentumGDNLiquidLN,
     CrossAttnLoraLN,
@@ -56,11 +58,15 @@ ARCH_FACTORIES = {
     "Rank1LiquidLN": Rank1LiquidLN,
     "RankRLiquidLN": RankRLiquidLN,
     "StableLiquidLN": StableLiquidLN,
+    "FactorizedLiquidLN": FactorizedLiquidLN,
     "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
     "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
+    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
     "GDNLiquidLN": GDNLiquidLN,
     "MomentumGDNLiquidLN": MomentumGDNLiquidLN,
     "StableGDNCondLiquidLN": StableLiquidLN,
+    "FactorizedGDNCondLiquidLN": FactorizedLiquidLN,
+    "FactorizedBatchMomentumGDNCondLiquidLN": FactorizedBatchMomentumLiquidLN,
     "CrossAttnLoraLN": CrossAttnLoraLN,
 }
 
@@ -69,8 +75,10 @@ _GDN_LAYERS = (GDNLiquidLN, MomentumGDNLiquidLN)
 # Units whose forward accepts an explicit `cond` argument.
 _COND_LAYERS = (
     StableLiquidLN,
+    FactorizedLiquidLN,
     SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
+    FactorizedBatchMomentumLiquidLN,
     GDNLiquidLN,
     MomentumGDNLiquidLN,
     CrossAttnLoraLN,
@@ -85,6 +93,8 @@ RECURRENT_ARCHS = {
     "SharedMomentumLiquidLN",
     "BatchMomentumLiquidLN",
     "StableGDNCondLiquidLN",
+    "FactorizedGDNCondLiquidLN",
+    "FactorizedBatchMomentumGDNCondLiquidLN",
 }
 
 
@@ -109,6 +119,10 @@ def _arch_map(arch: str) -> tuple[str, str]:
         return ("SharedMomentumLiquidLN", "MomentumGDNLiquidLN")
     if arch == "StableGDNCondLiquidLN":
         return ("StableLiquidLN", "StableLiquidLN")
+    if arch == "FactorizedGDNCondLiquidLN":
+        return ("FactorizedLiquidLN", "FactorizedLiquidLN")
+    if arch == "FactorizedBatchMomentumGDNCondLiquidLN":
+        return ("FactorizedBatchMomentumLiquidLN", "FactorizedBatchMomentumLiquidLN")
     return (arch, arch)
 
 
@@ -250,6 +264,7 @@ def _merge_heads(x: torch.Tensor, n_heads: int) -> torch.Tensor:
 # Transformer block
 # ---------------------------------------------------------------------------
 
+
 class LiquidTransformerBlock(nn.Module):
     """One pre-norm Transformer block: sliding-window attention + LLU FFN.
 
@@ -314,8 +329,7 @@ class LiquidTransformerBlock(nn.Module):
         if self.cond_provider is not None:
             self._sublayer_names = [*self._sublayer_names, "cond_provider"]
         self._gdn_sublayers = [
-            n for n in self._sublayer_names
-            if isinstance(getattr(self, n), _GDN_LAYERS)
+            n for n in self._sublayer_names if isinstance(getattr(self, n), _GDN_LAYERS)
         ]
         self.kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
 
@@ -328,7 +342,7 @@ class LiquidTransformerBlock(nn.Module):
 
     def _attention(self, h: torch.Tensor) -> torch.Tensor:
         h_norm = self.norm1(h)
-        q = _split_heads(self.q_proj(h_norm), self.n_heads)        # (B, H, dh)
+        q = _split_heads(self.q_proj(h_norm), self.n_heads)  # (B, H, dh)
         k = _split_heads(self.k_proj(h_norm), self.n_heads)
         v = _split_heads(self.v_proj(h_norm), self.n_heads)
 
@@ -336,23 +350,29 @@ class LiquidTransformerBlock(nn.Module):
         if len(self.kv_cache) > self.window:
             self.kv_cache.pop(0)
 
-        K = torch.stack([c[0] for c in self.kv_cache], dim=2)      # (B, H, L, dh)
+        K = torch.stack([c[0] for c in self.kv_cache], dim=2)  # (B, H, L, dh)
         V = torch.stack([c[1] for c in self.kv_cache], dim=2)
-        q_ = q.unsqueeze(2)                                        # (B, H, 1, dh)
+        q_ = q.unsqueeze(2)  # (B, H, 1, dh)
         scores = (q_ @ K.transpose(-1, -2)) / math.sqrt(self.d_head)
         attn = scores.softmax(dim=-1)
-        ctx = (attn @ V).squeeze(2)                                # (B, H, dh)
-        ctx = _merge_heads(ctx, self.n_heads)                     # (B, D)
+        ctx = (attn @ V).squeeze(2)  # (B, H, dh)
+        ctx = _merge_heads(ctx, self.n_heads)  # (B, D)
         out, self.caches["o_proj"] = _llu_step(self.o_proj, ctx, self.caches["o_proj"])
         return out
 
     def _ffn(self, h: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         h_norm = self.norm2(h)
         if self.use_swiglu:
-            g, self.caches["ffn_gate"] = _llu_step(self.ffn_gate, h_norm, self.caches["ffn_gate"], cond=cond)
-            u, self.caches["ffn_up"] = _llu_step(self.ffn_up, h_norm, self.caches["ffn_up"], cond=cond)
+            g, self.caches["ffn_gate"] = _llu_step(
+                self.ffn_gate, h_norm, self.caches["ffn_gate"], cond=cond
+            )
+            u, self.caches["ffn_up"] = _llu_step(
+                self.ffn_up, h_norm, self.caches["ffn_up"], cond=cond
+            )
             fused = F.silu(g) * u
-            out, self.caches["ffn_down"] = _llu_step(self.ffn_down, fused, self.caches["ffn_down"], cond=cond)
+            out, self.caches["ffn_down"] = _llu_step(
+                self.ffn_down, fused, self.caches["ffn_down"], cond=cond
+            )
             return out
         out, self.caches["ffn"] = _llu_step(self.ffn, h_norm, self.caches["ffn"], cond=cond)
         return out
@@ -375,6 +395,7 @@ class LiquidTransformerBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
+
 
 class LiquidTransformer(nn.Module):
     """Stacked :class:`LiquidTransformerBlock` with an LLU readout head.
@@ -415,19 +436,52 @@ class LiquidTransformer(nn.Module):
         proj_name, ffn_name = _arch_map(arch)
         proj_cls = ARCH_FACTORIES[proj_name]
         ffn_cls = ARCH_FACTORIES[ffn_name]
-        proj_kwargs = _llu_kwargs_for(proj_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization, attn_dim=lln_attn_dim, attn_heads=lln_attn_heads)
-        ffn_kwargs = _llu_kwargs_for(ffn_cls, rank, decay_rate, head_dim, num_heads_gdn, learnable_decay, parameterization=parameterization, attn_dim=lln_attn_dim, attn_heads=lln_attn_heads)
+        proj_kwargs = _llu_kwargs_for(
+            proj_cls,
+            rank,
+            decay_rate,
+            head_dim,
+            num_heads_gdn,
+            learnable_decay,
+            parameterization=parameterization,
+            attn_dim=lln_attn_dim,
+            attn_heads=lln_attn_heads,
+        )
+        ffn_kwargs = _llu_kwargs_for(
+            ffn_cls,
+            rank,
+            decay_rate,
+            head_dim,
+            num_heads_gdn,
+            learnable_decay,
+            parameterization=parameterization,
+            attn_dim=lln_attn_dim,
+            attn_heads=lln_attn_heads,
+        )
 
         # Optional GDN-2 cond provider (feeds `cond` to the StableLiquidLN FFN).
         # Its output is d_model-sized, so the FFN sublayers condition on a
         # `cond_dim=d_model` vector independent of their own in_features.
-        cond_llu = GDNLiquidLN if arch == "StableGDNCondLiquidLN" else None
+        cond_llu = (
+            GDNLiquidLN
+            if arch
+            in (
+                "StableGDNCondLiquidLN",
+                "FactorizedGDNCondLiquidLN",
+                "FactorizedBatchMomentumGDNCondLiquidLN",
+            )
+            else None
+        )
         if cond_llu is not None:
             ffn_kwargs = dict(ffn_kwargs)
             ffn_kwargs["cond_dim"] = d_model
             cond_kwargs = _llu_kwargs_for(
-                GDNLiquidLN, rank=1, decay_rate=decay_rate,
-                head_dim=8, num_heads=2, learnable_decay=learnable_decay,
+                GDNLiquidLN,
+                rank=1,
+                decay_rate=decay_rate,
+                head_dim=8,
+                num_heads=2,
+                learnable_decay=learnable_decay,
                 parameterization=parameterization,
             )
         else:
@@ -436,17 +490,28 @@ class LiquidTransformer(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 LiquidTransformerBlock(
-                    d_model, n_heads, proj_cls, ffn_cls, window,
-                    use_swiglu=use_swiglu, swiglu_mult=swiglu_mult,
-                    proj_kwargs=proj_kwargs, ffn_kwargs=ffn_kwargs,
+                    d_model,
+                    n_heads,
+                    proj_cls,
+                    ffn_cls,
+                    window,
+                    use_swiglu=use_swiglu,
+                    swiglu_mult=swiglu_mult,
+                    proj_kwargs=proj_kwargs,
+                    ffn_kwargs=ffn_kwargs,
                     use_attention=use_attention,
-                    cond_llu=cond_llu, cond_kwargs=cond_kwargs,
+                    cond_llu=cond_llu,
+                    cond_kwargs=cond_kwargs,
                 )
                 for _ in range(num_layers)
             ]
         )
         # Neutral per-position readout (no cross-step recurrence) for fair comparison.
-        self.readout = StableLiquidLN(d_model, out_dim, **_llu_kwargs_for(StableLiquidLN, rank, parameterization=parameterization))
+        self.readout = StableLiquidLN(
+            d_model,
+            out_dim,
+            **_llu_kwargs_for(StableLiquidLN, rank, parameterization=parameterization),
+        )
 
     def reset_state(self) -> None:
         for block in self.blocks:
@@ -463,7 +528,7 @@ class LiquidTransformer(nn.Module):
                 h = block.step(h)
             stream.append(h)
         stream = torch.stack(stream, dim=1)  # (B, T, D)
-        return self.readout(stream)          # (B, T, out_dim)
+        return self.readout(stream)  # (B, T, out_dim)
 
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())

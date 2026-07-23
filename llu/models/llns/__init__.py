@@ -7,6 +7,8 @@ from .batch_momentum_liquid import BatchMomentumLiquidLN
 from .gdn_liquid import GDNLiquidLN
 from .momentum_gdn_liquid import MomentumGDNLiquidLN
 from .cross_attn_lora import CrossAttnLoraLN
+from .factorized_liquid import FactorizedLiquidLN
+from .factorized_batch_momentum_liquid import FactorizedBatchMomentumLiquidLN
 
 __all__ = [
     "LiquidLinear",
@@ -18,4 +20,6 @@ __all__ = [
     "GDNLiquidLN",
     "MomentumGDNLiquidLN",
     "CrossAttnLoraLN",
+    "FactorizedLiquidLN",
+    "FactorizedBatchMomentumLiquidLN",
 ]

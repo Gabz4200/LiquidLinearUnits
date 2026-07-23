@@ -7,6 +7,8 @@ from .models.llns import (
     BatchMomentumLiquidLN,
     GDNLiquidLN,
     MomentumGDNLiquidLN,
+    CrossAttnLoraLN,
+    FactorizedLiquidLN,
 )
 from .models.gdn2 import GatedDeltaNet2
 
@@ -19,5 +21,7 @@ __all__ = [
     "BatchMomentumLiquidLN",
     "GDNLiquidLN",
     "MomentumGDNLiquidLN",
+    "CrossAttnLoraLN",
+    "FactorizedLiquidLN",
     "GatedDeltaNet2",
 ]
