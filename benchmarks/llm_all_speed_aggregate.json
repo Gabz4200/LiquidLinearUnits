@@ -1,0 +1,226 @@
+[
+  {
+    "tag": "baseline_baseline_p_svd",
+    "variant": "baseline",
+    "lln": "-",
+    "parameterization": "svd",
+    "params": 7653216,
+    "steps": 150,
+    "train_time_s": 80.6,
+    "ms_per_step": 537.3,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.7065863609313965,
+      "train_loss_best": 7.334540843963623,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "baseline_baseline_p_lora",
+    "variant": "baseline",
+    "lln": "-",
+    "parameterization": "lora",
+    "params": 7653216,
+    "steps": 150,
+    "train_time_s": 81.3,
+    "ms_per_step": 542.3,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.502134799957275,
+      "train_loss_best": 7.115368843078613,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "svd",
+    "params": 7564480,
+    "steps": 132,
+    "train_time_s": 55.7,
+    "ms_per_step": 421.7,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.802527904510498,
+      "train_loss_best": 7.249907970428467,
+      "steps": 132
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_p_lora",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "params": 8545968,
+    "steps": 150,
+    "train_time_s": 76.2,
+    "ms_per_step": 507.7,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.177635669708252,
+      "train_loss_best": 7.157322406768799,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_CrossAttnLoraLN_p_svd",
+    "variant": "ours",
+    "lln": "CrossAttnLoraLN",
+    "parameterization": "svd",
+    "params": 7747520,
+    "steps": 150,
+    "train_time_s": 67.5,
+    "ms_per_step": 449.9,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.314667224884033,
+      "train_loss_best": 7.041585445404053,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_CrossAttnLoraLN_p_lora",
+    "variant": "ours",
+    "lln": "CrossAttnLoraLN",
+    "parameterization": "lora",
+    "params": 7747504,
+    "steps": 131,
+    "train_time_s": 59.2,
+    "ms_per_step": 451.6,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.297764778137207,
+      "train_loss_best": 7.147316932678223,
+      "steps": 131
+    }
+  },
+  {
+    "tag": "ours_SharedMomentumLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "SharedMomentumLiquidLN",
+    "parameterization": "svd",
+    "params": 7547460,
+    "steps": 150,
+    "train_time_s": 64.4,
+    "ms_per_step": 429.6,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.78754997253418,
+      "train_loss_best": 7.1419997215271,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_SharedMomentumLiquidLN_p_lora",
+    "variant": "ours",
+    "lln": "SharedMomentumLiquidLN",
+    "parameterization": "lora",
+    "params": 8201780,
+    "steps": 150,
+    "train_time_s": 73.2,
+    "ms_per_step": 487.9,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.609685897827148,
+      "train_loss_best": 7.263443946838379,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_BatchMomentumLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "BatchMomentumLiquidLN",
+    "parameterization": "svd",
+    "params": 7547460,
+    "steps": 150,
+    "train_time_s": 65.1,
+    "ms_per_step": 433.7,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.45145320892334,
+      "train_loss_best": 7.310183525085449,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_BatchMomentumLiquidLN_p_lora",
+    "variant": "ours",
+    "lln": "BatchMomentumLiquidLN",
+    "parameterization": "lora",
+    "params": 8201780,
+    "steps": 129,
+    "train_time_s": 66.5,
+    "ms_per_step": 515.5,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.5819220542907715,
+      "train_loss_best": 7.444722652435303,
+      "steps": 129
+    }
+  },
+  {
+    "tag": "ours_FactorizedLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "FactorizedLiquidLN",
+    "parameterization": "svd",
+    "params": 7547456,
+    "steps": 150,
+    "train_time_s": 64.0,
+    "ms_per_step": 426.4,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.385683536529541,
+      "train_loss_best": 7.174465656280518,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_FactorizedLiquidLN_p_lora",
+    "variant": "ours",
+    "lln": "FactorizedLiquidLN",
+    "parameterization": "lora",
+    "params": 8234800,
+    "steps": 150,
+    "train_time_s": 73.1,
+    "ms_per_step": 487.0,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.589479446411133,
+      "train_loss_best": 6.989354133605957,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_FactorizedBatchMomentumLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "FactorizedBatchMomentumLiquidLN",
+    "parameterization": "svd",
+    "params": 7547460,
+    "steps": 150,
+    "train_time_s": 64.4,
+    "ms_per_step": 429.0,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.640060901641846,
+      "train_loss_best": 7.052469730377197,
+      "steps": 150
+    }
+  },
+  {
+    "tag": "ours_FactorizedBatchMomentumLiquidLN_p_lora",
+    "variant": "ours",
+    "lln": "FactorizedBatchMomentumLiquidLN",
+    "parameterization": "lora",
+    "params": 8234804,
+    "steps": 150,
+    "train_time_s": 73.8,
+    "ms_per_step": 492.0,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.598047733306885,
+      "train_loss_best": 7.232172966003418,
+      "steps": 150
+    }
+  }
+]

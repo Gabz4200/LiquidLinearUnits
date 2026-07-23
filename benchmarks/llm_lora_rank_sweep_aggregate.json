@@ -1,0 +1,170 @@
+[
+  {
+    "tag": "baseline_baseline_svd_r4",
+    "variant": "baseline",
+    "lln": "-",
+    "parameterization": "svd",
+    "rank": 4,
+    "lora_alpha": 1.0,
+    "params": 7653216,
+    "steps": 338,
+    "train_time_s": 180.8,
+    "ms_per_step": 534.8,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.366003513336182,
+      "train_loss_best": 6.709284782409668,
+      "steps": 338,
+      "wiki_ppl": 6808.116479065766,
+      "lmb_ppl": 167093.3000984897,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r1_a1",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 1,
+    "lora_alpha": 1.0,
+    "params": 7751792,
+    "steps": 294,
+    "train_time_s": 130.3,
+    "ms_per_step": 443.2,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.346103191375732,
+      "train_loss_best": 6.973479747772217,
+      "steps": 294,
+      "wiki_ppl": 7199.47159117587,
+      "lmb_ppl": 153289.28344726624,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r2_a2",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 2,
+    "lora_alpha": 2.0,
+    "params": 7959152,
+    "steps": 267,
+    "train_time_s": 124.8,
+    "ms_per_step": 467.3,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.301493167877197,
+      "train_loss_best": 6.9330339431762695,
+      "steps": 267,
+      "wiki_ppl": 6466.201328850239,
+      "lmb_ppl": 164827.47643290093,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r4_a4",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 4,
+    "lora_alpha": 4.0,
+    "params": 8545968,
+    "steps": 267,
+    "train_time_s": 132.2,
+    "ms_per_step": 495.1,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.648784160614014,
+      "train_loss_best": 6.94119119644165,
+      "steps": 267,
+      "wiki_ppl": 6846.769281288038,
+      "lmb_ppl": 162710.84626716413,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r8_a8",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 8,
+    "lora_alpha": 8.0,
+    "params": 10211120,
+    "steps": 265,
+    "train_time_s": 156.1,
+    "ms_per_step": 588.9,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.663983345031738,
+      "train_loss_best": 7.0592546463012695,
+      "steps": 265,
+      "wiki_ppl": 6337.411362939577,
+      "lmb_ppl": 191813.23101149773,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r16_a16",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 16,
+    "lora_alpha": 16.0,
+    "params": 18161968,
+    "steps": 322,
+    "train_time_s": 281.6,
+    "ms_per_step": 874.4,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.230541706085205,
+      "train_loss_best": 6.800026893615723,
+      "steps": 322,
+      "wiki_ppl": 6364.415303230424,
+      "lmb_ppl": 166374.6251697262,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_lora_r4_a1.0",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "lora",
+    "rank": 4,
+    "lora_alpha": 1.0,
+    "params": 8545968,
+    "steps": 187,
+    "train_time_s": 94.6,
+    "ms_per_step": 506.0,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.510776519775391,
+      "train_loss_best": 7.092665195465088,
+      "steps": 187,
+      "wiki_ppl": 6675.383755166838,
+      "lmb_ppl": 137876.3632650707,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_svd_r4",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "svd",
+    "rank": 4,
+    "lora_alpha": 1.0,
+    "params": 7564480,
+    "steps": 264,
+    "train_time_s": 120.6,
+    "ms_per_step": 456.9,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.393970489501953,
+      "train_loss_best": 6.971744537353516,
+      "steps": 264,
+      "wiki_ppl": 6191.738976701356,
+      "lmb_ppl": 146795.9536696519,
+      "lmb_acc": 0.0
+    }
+  }
+]

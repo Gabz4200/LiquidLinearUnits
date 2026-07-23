@@ -1,0 +1,131 @@
+========================================================================
+LIQUID LINEAR UNITS -- SYNTHETIC SEQUENCE BENCHMARK
+generated : 2026-07-23 10:45:02
+device    : cpu
+------------------------------------------------------------------------
+GLOBAL CONFIG
+  archs        : FactorizedBatchMomentumGDNCondLiquidLN, StableGDNCondLiquidLN, FactorizedGDNCondLiquidLN, FactorizedBatchMomentumLiquidLN, BatchMomentumLiquidLN
+  tasks        : overwrite_recall, correlated_key, capacity, needle, xor, in_context_regression, permutation_S3, permutation_S5, selective_copy, induction_heads
+  sweeps       : off
+  use_attention : True   ablate_attention : False
+  steps        : 30   batch : 8   eval_batch : 64
+  num_layers   : 1   window : 8   n_heads : 4
+  use_swiglu   : True   swiglu_mult : 4
+  rank         : 4   decay_rate : 0.4   lr : 0.001
+  lln_attn_dim : 32   lln_attn_heads : 2
+  seed         : 0   quick : True
+========================================================================
+
+------------------------------------------------------------------------
+TASK overwrite_recall
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     133782     1.082     1.141 mse=1.14 success_rate=0    119.4   8.375
+StableGDNCondLiquidLN              125711    0.9951     1.142 mse=1.14 success_rate=0      109   9.177
+FactorizedGDNCondLiquidLN          133775     1.118     1.096 mse=1.1 success_rate=0      122   8.195
+FactorizedBatchMomentumLiquidLN     136998     1.153     1.156 mse=1.16 success_rate=0    83.94   11.91
+BatchMomentumLiquidLN              125670     1.289     1.309 mse=1.31 success_rate=0     80.9   12.36
+
+------------------------------------------------------------------------
+TASK correlated_key
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     133782     1.192     1.092 mse=1.09 success_rate=0    131.7   7.595
+StableGDNCondLiquidLN              125711     1.014     1.023 mse=1.02 success_rate=0    126.4   7.911
+FactorizedGDNCondLiquidLN          133775     1.192     1.048 mse=1.05 success_rate=0    138.9   7.199
+FactorizedBatchMomentumLiquidLN     136998     1.521     1.177 mse=1.18 success_rate=0    77.55   12.89
+BatchMomentumLiquidLN              125670     1.339     1.232 mse=1.23 success_rate=0    81.25   12.31
+
+------------------------------------------------------------------------
+TASK capacity
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     133782     1.093      1.26 mse=1.26 success_rate=0      174   5.746
+StableGDNCondLiquidLN              125711    0.9699     1.217 mse=1.22 success_rate=0    217.9    4.59
+FactorizedGDNCondLiquidLN          133775     1.161     1.248 mse=1.25 success_rate=0    132.1   7.567
+FactorizedBatchMomentumLiquidLN     136998     1.554     1.346 mse=1.35 success_rate=0    79.94   12.51
+BatchMomentumLiquidLN              125670     1.226     1.353 mse=1.35 success_rate=0    76.28   13.11
+
+------------------------------------------------------------------------
+TASK needle
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     133782     1.395     1.236 mse=1.24 success_rate=0    137.5   7.273
+StableGDNCondLiquidLN              125711     1.526     1.281 mse=1.28 success_rate=0    122.6    8.16
+FactorizedGDNCondLiquidLN          133775     1.469     1.235 mse=1.23 success_rate=0    346.5   2.886
+FactorizedBatchMomentumLiquidLN     136998      1.36     1.529 mse=1.53 success_rate=0    260.5   3.839
+BatchMomentumLiquidLN              125670     1.202     1.377 mse=1.38 success_rate=0    285.8   3.499
+
+------------------------------------------------------------------------
+TASK xor
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN      61582    0.3801     0.453              acc=0.734    44.25    22.6
+StableGDNCondLiquidLN               57543    0.5614    0.5612              acc=0.688     40.7   24.57
+FactorizedGDNCondLiquidLN           61575    0.5252    0.6482              acc=0.562     40.3   24.82
+FactorizedBatchMomentumLiquidLN      63052    0.8557    0.8954              acc=0.578    55.28   18.09
+BatchMomentumLiquidLN               57484     0.233    0.2458              acc=0.891    41.28   24.22
+
+------------------------------------------------------------------------
+TASK in_context_regression
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN      38848     3.946     5.114 mse=5.11 success_rate=0.123 ceiling_mse=0.00181    305.2   3.277
+StableGDNCondLiquidLN               36153      4.54     5.565 mse=5.56 success_rate=0.13 ceiling_mse=0.00181    284.3   3.517
+FactorizedGDNCondLiquidLN           38841     4.315     5.109 mse=5.11 success_rate=0.118 ceiling_mse=0.00181      181   5.524
+FactorizedBatchMomentumLiquidLN      39628     4.556     5.587 mse=5.59 success_rate=0.108 ceiling_mse=0.00181    82.14   12.17
+BatchMomentumLiquidLN               35980     4.173     5.981 mse=5.98 success_rate=0.155 ceiling_mse=0.00181    78.73    12.7
+
+------------------------------------------------------------------------
+TASK permutation_S3
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN      47723     1.329     1.196               acc=0.55    79.63   12.56
+StableGDNCondLiquidLN               44580     1.318     1.324              acc=0.478    67.96   14.72
+FactorizedGDNCondLiquidLN           47716     1.466     1.276              acc=0.488    74.15   13.49
+FactorizedBatchMomentumLiquidLN      48739     1.148     1.197              acc=0.544    49.05   20.39
+BatchMomentumLiquidLN               44451     1.586     1.289              acc=0.534    42.56    23.5
+
+------------------------------------------------------------------------
+TASK permutation_S5
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN    1200377     3.884     3.588              acc=0.309    105.4   9.488
+StableGDNCondLiquidLN             1287338     3.672     3.555              acc=0.328    103.7   9.648
+FactorizedGDNCondLiquidLN         1200370     3.745     3.566              acc=0.322    104.3   9.592
+FactorizedBatchMomentumLiquidLN    1377239     3.823     3.657              acc=0.306    81.79   12.23
+BatchMomentumLiquidLN             1273055     3.939      3.58              acc=0.328    78.89   12.68
+
+------------------------------------------------------------------------
+TASK selective_copy
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     136006    0.6261    0.8197              acc=0.758    250.3   3.995
+StableGDNCondLiquidLN              127935     0.328      0.29                  acc=1    221.4   4.517
+FactorizedGDNCondLiquidLN          135999    0.7886    0.6256               acc=0.91    235.5   4.246
+FactorizedBatchMomentumLiquidLN     139222     1.859     1.588              acc=0.492    158.3   6.317
+BatchMomentumLiquidLN              127894     1.471     1.449              acc=0.605    139.9   7.145
+
+------------------------------------------------------------------------
+TASK induction_heads
+------------------------------------------------------------------------
+arch                               params   tr_loss   ev_loss                                   metric  ms/step    st/s
+------------------------------------------------------------------------
+FactorizedBatchMomentumGDNCondLiquidLN     264849     3.524     3.502             acc=0.0469    540.6    1.85
+StableGDNCondLiquidLN              250058     3.192      3.54             acc=0.0156    523.1   1.912
+FactorizedGDNCondLiquidLN          264842     3.333     3.608             acc=0.0312    512.2   1.952
+FactorizedBatchMomentumLiquidLN     269895     3.552     3.727             acc=0.0469    334.2   2.993
+BatchMomentumLiquidLN              248967     3.979     3.912                  acc=0      317   3.155
+
+========================================================================
+END OF REPORT -- 50 runs
+========================================================================

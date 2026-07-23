@@ -1,0 +1,116 @@
+[
+  {
+    "tag": "baseline_baseline_p_svd",
+    "variant": "baseline",
+    "lln": "-",
+    "parameterization": "svd",
+    "params": 15128704,
+    "steps": 252,
+    "train_time_s": 279.1,
+    "ms_per_step": 1107.4,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 6.767302989959717,
+      "train_loss_best": 6.347319602966309,
+      "steps": 252,
+      "wiki_ppl": 8375.981784266462,
+      "lmb_ppl": 214622.27120659724,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_FactorizedBatchMomentumLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "FactorizedBatchMomentumLiquidLN",
+    "parameterization": "svd",
+    "params": 14588968,
+    "steps": 276,
+    "train_time_s": 227.3,
+    "ms_per_step": 823.7,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.68820858001709,
+      "train_loss_best": 6.591887950897217,
+      "steps": 276,
+      "wiki_ppl": 6592.858845101449,
+      "lmb_ppl": 231394.98902987354,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_SharedMomentumLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "SharedMomentumLiquidLN",
+    "parameterization": "svd",
+    "params": 14588968,
+    "steps": 300,
+    "train_time_s": 248.2,
+    "ms_per_step": 827.3,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.306309223175049,
+      "train_loss_best": 6.358251571655273,
+      "steps": 300,
+      "wiki_ppl": 7093.482369668193,
+      "lmb_ppl": 208729.41211734223,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_FactorizedLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "FactorizedLiquidLN",
+    "parameterization": "svd",
+    "params": 14588960,
+    "steps": 252,
+    "train_time_s": 209.3,
+    "ms_per_step": 830.4,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.284376621246338,
+      "train_loss_best": 6.263669967651367,
+      "steps": 252,
+      "wiki_ppl": 7120.537977246085,
+      "lmb_ppl": 186572.52072230322,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_CrossAttnLoraLN_p_svd",
+    "variant": "ours",
+    "lln": "CrossAttnLoraLN",
+    "parameterization": "svd",
+    "params": 15139104,
+    "steps": 300,
+    "train_time_s": 262.3,
+    "ms_per_step": 874.2,
+    "early_stopped": false,
+    "metrics": {
+      "train_loss_final": 7.057417869567871,
+      "train_loss_best": 6.210398197174072,
+      "steps": 300,
+      "wiki_ppl": 6489.474373584237,
+      "lmb_ppl": 163277.5553530145,
+      "lmb_acc": 0.0
+    }
+  },
+  {
+    "tag": "ours_StableLiquidLN_p_svd",
+    "variant": "ours",
+    "lln": "StableLiquidLN",
+    "parameterization": "svd",
+    "params": 14689824,
+    "steps": 211,
+    "train_time_s": 176.5,
+    "ms_per_step": 836.7,
+    "early_stopped": true,
+    "metrics": {
+      "train_loss_final": 7.1362433433532715,
+      "train_loss_best": 6.808899879455566,
+      "steps": 211,
+      "wiki_ppl": 6946.532806139801,
+      "lmb_ppl": 122392.73296517247,
+      "lmb_acc": 0.0
+    }
+  }
+]
