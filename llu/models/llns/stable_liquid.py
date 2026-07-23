@@ -9,6 +9,7 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
+    _factorized_hyperfan_init,
     _validate_parameterization,
 )
 
@@ -44,44 +45,44 @@ class StableLiquidLN(BaseLLU):
         cond_dim: Optional[int] = None,
         init_method: str = "hyperfan_in",
         parameterization: str = "lora",
+        lora_alpha: float = 1.0,
+        factorized: bool = False,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", parameterization="lora", device=None, dtype=torch.float32) -> None
+        r"""__init__(in_features, out_features, rank=4, ...) -> None
 
         Args:
-            in_features (int): size of each input sample.
-            out_features (int): size of each output sample.
-            rank (int): number of factor pairs :math:`(a_r, b_r)`.  Default: ``4``.
-            hyper_hidden_dim (int, optional): hidden dimension of the MLP
-                hypernetwork.  Default: ``None`` (``max(in_features // 4, rank * 16)``).
-            bias (bool): whether the core :class:`~nn.Linear` has a learnable bias.
+            in_features: size of each input sample.
+            out_features: size of each output sample.
+            rank: number of factor pairs :math:`(a_r, b_r)`.  Default: ``4``.
+            hyper_hidden_dim: hidden dimension of the MLP hypernetwork.
+                Default: ``None`` (``max(in_features // 4, rank * 16)``).
+            bias: whether the core :class:`~nn.Linear` has a learnable bias.
                 Default: ``True``.
-            dynamic_bias (bool): if ``True``, an input-dependent bias from an
+            dynamic_bias: if ``True``, an input-dependent bias from an
                 MLP is added to the output.  Default: ``False``.
-            factor_activation (str): activation for the factor vectors.
+            factor_activation: activation for the factor vectors.
                 One of ``"tanh"``, ``"norm"``, ``"rmsnorm"``, or ``"none"``.
                 Default: ``"norm"``.
-            scale_init (float): initial value of the per-channel scalar multiplier
+            scale_init: initial value of the per-channel scalar multiplier
                 on the adaptive path.  Default: ``0.01``.
-            normalize_input (bool): if ``True``, apply RMSNorm to the conditioning
+            normalize_input: if ``True``, apply RMSNorm to the conditioning
                 input before the hypernetwork.  Default: ``True``.
-            cond_dim (int, optional): dimension of the conditioning tensor fed to
-                the hypernetwork.  Defaults to ``in_features`` so that, when no
-                separate condition is supplied, the input itself conditions the
-                factors.  Set it to a different size to drive the factors from an
-                external ``cond`` whose last dimension differs from ``in_features``
-                (e.g. a d_model-sized dynamic conditioner feeding layers whose
-                ``in_features`` vary).
-            init_method (str): weight initialisation method for the hypernetwork.
+            cond_dim: dimension of the conditioning tensor fed to
+                the hypernetwork.  Defaults to ``in_features``.
+            init_method: weight initialisation method for the hypernetwork.
                 One of ``"hyperfan_in"``, ``"hyperfan_out"``, ``"xavier"``,
                 or ``"small"``.  Default: ``"hyperfan_in"``.
-            parameterization (str): parameterization mode for the update, either
+            parameterization: parameterization mode for the update, either
                 ``"lora"`` or ``"svd"``. Default: ``"lora"``.
-            device (torch.device, optional): the desired device of the parameters.
-                Default: ``None``.
-            dtype (torch.dtype): the desired data type of the parameters.
-                Default: ``torch.float32``.
+            lora_alpha: LoRA alpha for scaling (``alpha / rank``).
+                Default: ``1.0``.
+            factorized: if ``True``, use separate A/B projections
+                (Zhyper-style) instead of a single monolithic output.
+                Reduces hypernetwork parameters by ~2x.  Default: ``False``.
+            device: device of parameters.  Default: ``None``.
+            dtype: data type of parameters.  Default: ``torch.float32``.
         """
         if rank < 1:
             raise ValueError(f"rank must be >= 1, got {rank}")
@@ -103,28 +104,45 @@ class StableLiquidLN(BaseLLU):
         self.normalize_input = normalize_input
         self.cond_dim = cond_dim if cond_dim is not None else in_features
         self.parameterization = parameterization
+        self.lora_alpha = lora_alpha
+        self.factorized = factorized
 
-        # MLP hypernetwork (conditions on the `cond_dim`-sized cond vector)
         hidden_dim = hyper_hidden_dim or max(in_features // 4, rank * 16)
 
         if self.parameterization == "lora":
-            # Generates both factor matrices dynamically
-            self.hypernetwork = nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, rank * (out_features + in_features), device=dev, dtype=dtype),
-            )
+            if factorized:
+                self.proj_a = nn.Sequential(
+                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.SiLU(),
+                    nn.Linear(hidden_dim, rank * out_features, device=dev, dtype=dtype),
+                )
+                self.proj_b = nn.Sequential(
+                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.SiLU(),
+                    nn.Linear(hidden_dim, rank * in_features, device=dev, dtype=dtype),
+                )
+                self.hypernetwork = None
+            else:
+                self.hypernetwork = nn.Sequential(
+                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.SiLU(),
+                    nn.Linear(
+                        hidden_dim, rank * (out_features + in_features), device=dev, dtype=dtype
+                    ),
+                )
+                self.proj_a = None
+                self.proj_b = None
         else:
-            # SVD mode: hypernetwork outputs dynamic diagonal scaling vector
             self.hypernetwork = nn.Sequential(
                 nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
                 nn.Linear(hidden_dim, rank, device=dev, dtype=dtype),
             )
+            self.proj_a = None
+            self.proj_b = None
             self._create_svd_factors(dev, dtype)
 
-        # Dynamic bias with MLP
-        self.bias_dynamic: Optional[nn.Sequential] = (
+        self.bias_dynamic: Optional[nn.Module] = (
             nn.Sequential(
                 nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
@@ -137,64 +155,60 @@ class StableLiquidLN(BaseLLU):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        r"""_init_weights() -> None
-
-        Initialise hypernetwork layers with the chosen init method.
-        Under "lora", zeroes the b-section.
-        Under "svd", zeroes the final layer of the hypernetwork and initialises U and V.
-        """
         if self.parameterization == "lora":
-            self._init_low_rank_adaptive(self.hypernetwork, self.rank * self.out_features, rank=self.rank)
+            if self.factorized:
+                _factorized_hyperfan_init(
+                    self.proj_a,
+                    self.proj_b,
+                    self.in_features,
+                    self.out_features,
+                    self.rank,
+                )
+                last_b = self.proj_b[-1] if isinstance(self.proj_b, nn.Sequential) else self.proj_b
+                with torch.no_grad():
+                    last_b.weight.data.zero_()
+                    if last_b.bias is not None:
+                        last_b.bias.data.zero_()
+            else:
+                self._init_low_rank_adaptive(
+                    self.hypernetwork, self.rank * self.out_features, rank=self.rank
+                )
         else:
             self._init_svd_projection(self.hypernetwork)
 
     def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
-        r"""forward(x, cond=None) -> Tensor
-
-        Args:
-            x (Tensor): input tensor of shape ``(..., in_features)``.
-            cond (Tensor, optional): optional conditioning tensor.  When
-            ``None``, *x* is used.  The conditioning drives the hypernetwork
-            while *x* always goes through the core linear path.
-
-        Returns:
-            Tensor: output tensor of shape ``(..., out_features)``.
-        """
         cond = cond if cond is not None else x
-
-        # RMSNorm for magnitude invariance (over the conditioning dim)
         h_in = F.rms_norm(cond, (self.cond_dim,)) if self.normalize_input else cond
 
         core_out = self.linear_core(x)
 
         if self.parameterization == "lora":
-            raw = self.hypernetwork(h_in)
-
-            split = self.rank * self.out_features
-            a_raw = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
-            b_raw = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
+            if self.factorized:
+                a_raw = self.proj_a(h_in).reshape(*h_in.shape[:-1], self.rank, self.out_features)
+                b_raw = self.proj_b(h_in).reshape(*h_in.shape[:-1], self.rank, self.in_features)
+            else:
+                raw = self.hypernetwork(h_in)
+                split = self.rank * self.out_features
+                a_raw = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
+                b_raw = raw[..., split:].reshape(*h_in.shape[:-1], self.rank, self.in_features)
 
             a = _activate(a_raw, self.factor_activation)
             b = _activate(b_raw, self.factor_activation)
-
             adaptive = self._compute_low_rank_adaptive(a, b, x)
         else:
-            # Output g_raw has shape (..., rank)
             g_raw = self.hypernetwork(h_in)
-
-            # Activate the scaling coefficients using factor_activation
             g = _activate(g_raw, self.factor_activation)
-
             adaptive = self._compute_svd_adaptive(x, g)
 
-        out = core_out + adaptive
+        lora_scale = self.lora_alpha / self.rank
+        out = core_out + lora_scale * adaptive
         out = self._apply_dynamic_bias(out, cond)
-
         return out
 
     def extra_repr(self) -> str:
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"mode={self.parameterization}"
+            f"mode={self.parameterization}, factorized={self.factorized}, "
+            f"lora_alpha={self.lora_alpha}"
         )

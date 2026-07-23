@@ -38,6 +38,8 @@ from .llns import (
     CrossAttnLoraLN,
     SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
+    FactorizedLiquidLN,
+    FactorizedBatchMomentumLiquidLN,
 )
 
 # Intermediary LLN classes that can sit between the SWA/X mixer and the
@@ -45,23 +47,29 @@ from .llns import (
 # separate ``cond`` tensor (the GDN-2 conditioning stream) and is parameterised
 # by ``rank`` / ``parameterization`` so it can run as a learned low-rank update:
 #
-# * ``StableLiquidLN``      -- input-adaptive hypernetwork factors (the original).
-# * ``CrossAttnLoraLN``     -- LoRA-style factors refined by cross-attention over
-#                              the ``cond`` sequence (the novel option).
-# * ``SharedMomentumLiquidLN``   -- factors with an EMA momentum over the batch.
-# * ``BatchMomentumLiquidLN``    -- factors with a per-batch-element momentum.
+# * ``StableLiquidLN``                  -- input-adaptive hypernetwork factors (monolithic).
+# * ``CrossAttnLoraLN``                 -- LoRA-style factors refined by cross-attention over
+#                                           the ``cond`` sequence.
+# * ``SharedMomentumLiquidLN``          -- factors with a shared EMA momentum over the batch.
+# * ``BatchMomentumLiquidLN``           -- factors with a per-batch-element momentum.
+# * ``FactorizedLiquidLN``              -- factorized A/B generation (two separate projections).
+# * ``FactorizedBatchMomentumLiquidLN`` -- factorized A/B generation + per-batch-element momentum.
 #
 # ``RankRLiquidLN`` is deliberately excluded: it has no ``cond`` port, so it
 # cannot act as the intermediary. The two GDN-2 LLUs (``GDNLiquidLN`` /
 # ``MomentumGDNLiquidLN``) are also excluded because the ``ours`` block already
 # produces ``cond`` via a GDN-2 recurrence -- stacking a second GDN-2 inside the
-# intermediary would be redundant and ~5x slower/step.
+# intermediary would be redundant and ~5x slower/step. ``LiquidLinear`` and
+# ``Rank1LiquidLN`` are excluded for the same reason (no ``cond`` port).
 LLN_REGISTRY = {
     "StableLiquidLN": StableLiquidLN,
     "CrossAttnLoraLN": CrossAttnLoraLN,
     "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
     "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
+    "FactorizedLiquidLN": FactorizedLiquidLN,
+    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
 }
+
 
 def _lln_kwargs_for(
     cls: type,
@@ -75,6 +83,7 @@ def _lln_kwargs_for(
     attn_heads: int,
     decay_rate: float = 0.4,
     learnable_decay_rate: bool = False,
+    lora_alpha: float = 1.0,
 ) -> dict:
     """Forward only the kwargs ``cls.__init__`` accepts.
 
@@ -94,6 +103,7 @@ def _lln_kwargs_for(
         attn_heads=attn_heads,
         decay_rate=decay_rate,
         learnable_decay_rate=learnable_decay_rate,
+        lora_alpha=lora_alpha,
     )
     return {k: v for k, v in cand.items() if k in params}
 
@@ -101,6 +111,7 @@ def _lln_kwargs_for(
 # ---------------------------------------------------------------------------
 # RoPE
 # ---------------------------------------------------------------------------
+
 
 class RotaryEmbedding(nn.Module):
     """Standard rotary position embedding (cached inv_freq)."""
@@ -112,8 +123,8 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, seq_len: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(t, self.inv_freq)            # (T, dim/2)
-        emb = torch.cat((freqs, freqs), dim=-1)          # (T, dim)
+        freqs = torch.outer(t, self.inv_freq)  # (T, dim/2)
+        emb = torch.cat((freqs, freqs), dim=-1)  # (T, dim)
         return emb.cos(), emb.sin()
 
 
@@ -133,12 +144,17 @@ def _causal_window_mask(seq_len: int, window: int, device: torch.device) -> torc
     idx = torch.arange(seq_len, device=device)
     dist = idx[:, None] - idx[None, :]
     ok = (dist >= 0) & (dist < window)
-    return torch.where(ok, torch.zeros_like(dist, dtype=torch.float32), torch.full_like(dist, float("-inf"), dtype=torch.float32))
+    return torch.where(
+        ok,
+        torch.zeros_like(dist, dtype=torch.float32),
+        torch.full_like(dist, float("-inf"), dtype=torch.float32),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Sublayers
 # ---------------------------------------------------------------------------
+
 
 class SwiGLU(nn.Module):
     """Main feed-forward MLP (gate/up/down with SiLU) — plain nn.Linear."""
@@ -200,6 +216,7 @@ class IntermediaryMLP(nn.Module):
         lln_cls: type = StableLiquidLN,
         attn_dim: int = 32,
         attn_heads: int = 2,
+        lora_alpha: float = 1.0,
     ) -> None:
         super().__init__()
         self.proj1 = nn.Linear(cond_dim, cond_dim, bias=False)
@@ -208,9 +225,15 @@ class IntermediaryMLP(nn.Module):
         # cond_dim is fixed (the GDN-2 output size). StableLiquidLN and
         # CrossAttnLoraLN both decouple the two via their `cond_dim` argument.
         lln_kwargs = _lln_kwargs_for(
-            lln_cls, rank=rank, cond_dim=cond_dim,
-            parameterization=parameterization, normalize_input=False,
-            factor_activation="norm", attn_dim=attn_dim, attn_heads=attn_heads,
+            lln_cls,
+            rank=rank,
+            cond_dim=cond_dim,
+            parameterization=parameterization,
+            normalize_input=False,
+            factor_activation="norm",
+            attn_dim=attn_dim,
+            attn_heads=attn_heads,
+            lora_alpha=lora_alpha,
         )
         self.sl1 = lln_cls(d_model, inter_dim, **lln_kwargs)
         self.act = nn.SiLU()
@@ -229,6 +252,7 @@ class IntermediaryMLP(nn.Module):
 # Blocks
 # ---------------------------------------------------------------------------
 
+
 class LiquidGDNCondBlock(nn.Module):
     """SWA (X) + GDN-2 (cond) -> Intermediary liquid MLP -> residual.
 
@@ -246,20 +270,37 @@ class LiquidGDNCondBlock(nn.Module):
         self.norm1 = nn.RMSNorm(d)
         self.swa = SlidingWindowAttention(d, H, w)
         self.gdn2 = GatedDeltaNet2(
-            hidden_size=d, expand_v=cfg.gdn_expand_v,
-            head_dim=d // H, num_heads=H, mode="chunk",
+            hidden_size=d,
+            expand_v=cfg.gdn_expand_v,
+            head_dim=d // H,
+            num_heads=H,
+            mode="chunk",
         )
         lln_cls = LLN_REGISTRY[cfg.lln]
         self.inter = IntermediaryMLP(
-            d, inter, d, cfg.rank, parameterization=cfg.parameterization,
-            lln_cls=lln_cls, attn_dim=cfg.lln_attn_dim, attn_heads=cfg.lln_attn_heads,
+            d,
+            inter,
+            d,
+            cfg.rank,
+            parameterization=cfg.parameterization,
+            lln_cls=lln_cls,
+            attn_dim=cfg.lln_attn_dim,
+            attn_heads=cfg.lln_attn_heads,
+            lora_alpha=cfg.lora_alpha,
         )
         self.norm2 = None if self.parallel else nn.RMSNorm(d)
         self.mlp = SwiGLU(d, cfg.swiglu_mult)
 
         # Initialize linear layers with Xavier uniform
-        for m in [self.swa.qkv, self.swa.proj, self.inter.proj1, self.inter.proj2,
-                  self.mlp.gate, self.mlp.up, self.mlp.down]:
+        for m in [
+            self.swa.qkv,
+            self.swa.proj,
+            self.inter.proj1,
+            self.inter.proj2,
+            self.mlp.gate,
+            self.mlp.up,
+            self.mlp.down,
+        ]:
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
@@ -286,8 +327,11 @@ class GDN2BaselineBlock(nn.Module):
         self.parallel = cfg.parallel_residual
         self.norm1 = nn.RMSNorm(d)
         self.gdn2 = GatedDeltaNet2(
-            hidden_size=d, expand_v=cfg.gdn_expand_v,
-            head_dim=d // H, num_heads=H, mode="chunk",
+            hidden_size=d,
+            expand_v=cfg.gdn_expand_v,
+            head_dim=d // H,
+            num_heads=H,
+            mode="chunk",
         )
         self.norm2 = None if self.parallel else nn.RMSNorm(d)
         self.mlp = SwiGLU(d, cfg.swiglu_mult)
@@ -313,6 +357,7 @@ class GDN2BaselineBlock(nn.Module):
 # Models
 # ---------------------------------------------------------------------------
 
+
 class LiquidGDNCondLLM(nn.Module):
     """Our architecture: SWA + GDN-2-conditioned liquid intermediary MLP.
 
@@ -328,7 +373,7 @@ class LiquidGDNCondLLM(nn.Module):
         # nn.Embedding defaults to N(0, 1); at vocab=50257 that makes logits
         # explode (init CE ~300, training never recovers). Scale to
         # 1/sqrt(n_embd) so logits start at unit scale and init CE ~= ln(vocab).
-        nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd ** 0.5))
+        nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd**0.5))
         self.blocks = nn.ModuleList([LiquidGDNCondBlock(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = nn.RMSNorm(cfg.n_embd)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
@@ -358,7 +403,7 @@ class GDN2BaselineLLM(nn.Module):
         # nn.Embedding defaults to N(0, 1); at vocab=50257 that makes logits
         # explode (init CE ~300, training never recovers). Scale to
         # 1/sqrt(n_embd) so logits start at unit scale and init CE ~= ln(vocab).
-        nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd ** 0.5))
+        nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd**0.5))
         self.blocks = nn.ModuleList([GDN2BaselineBlock(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = nn.RMSNorm(cfg.n_embd)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
@@ -382,27 +427,29 @@ class GDN2BaselineLLM(nn.Module):
 # Config / factory
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LLMConfig:
     """Shared config for both LLM variants (so they compare at one budget)."""
 
-    variant: str = "ours"            # "ours" | "baseline"
-    vocab_size: int = 50257          # GPT-2 vocab
+    variant: str = "ours"  # "ours" | "baseline"
+    vocab_size: int = 50257  # GPT-2 vocab
     n_layer: int = 8
     n_embd: int = 320
     n_head: int = 8
-    window: int = 256                # SWA context; >= block_size => global
+    window: int = 256  # SWA context; >= block_size => global
     block_size: int = 1024
     swiglu_mult: int = 4
-    inter_mult: int = 4              # intermediary StableLiquidLN hidden mult
-    rank: int = 4                    # StableLiquidLN factor rank
-    gdn_expand_v: float = 1.0        # GDN-2 value expansion ("2x dimension")
-    parallel_residual: bool = True   # GPT-NeoX parallel residual
-    tie_embed: bool = True           # tie wte/lm_head (saves params)
-    parameterization: str = "svd"    # "lora" | "svd"
-    lln: str = "StableLiquidLN"       # intermediary LLN class name
-    lln_attn_dim: int = 32           # CrossAttnLoraLN cross-attn dim
-    lln_attn_heads: int = 2          # CrossAttnLoraLN cross-attn heads
+    inter_mult: int = 4  # intermediary StableLiquidLN hidden mult
+    rank: int = 4  # StableLiquidLN factor rank
+    gdn_expand_v: float = 1.0  # GDN-2 value expansion ("2x dimension")
+    parallel_residual: bool = True  # GPT-NeoX parallel residual
+    tie_embed: bool = True  # tie wte/lm_head (saves params)
+    parameterization: str = "svd"  # "lora" | "svd"
+    lora_alpha: float = 1.0  # LoRA alpha for scaling (alpha / rank)
+    lln: str = "StableLiquidLN"  # intermediary LLN class name
+    lln_attn_dim: int = 32  # CrossAttnLoraLN cross-attn dim
+    lln_attn_heads: int = 2  # CrossAttnLoraLN cross-attn heads
 
     # Preset budgets, per architecture. The baseline (GDN-2 mixer, no
     # attention) is cheaper per layer than ``ours`` (which also pays for SWA +
@@ -413,14 +460,11 @@ class LLMConfig:
     # a full LLN comparison across 4 variants fits in a few minutes and a few
     # hundred MB. ``small``/``medium``/``0.5B`` are for GPU-class hardware.
     PRESETS = {
-        "tiny":    {"ours": dict(n_layer=2,  n_embd=128),
-                    "baseline": dict(n_layer=4, n_embd=128)},
-        "small":  {"ours": dict(n_layer=8,  n_embd=320),
-                  "baseline": dict(n_layer=24, n_embd=320)},
-        "medium": {"ours": dict(n_layer=12, n_embd=512),
-                  "baseline": dict(n_layer=36, n_embd=512)},
-        "0.5B":   {"ours": dict(n_layer=24, n_embd=1024),
-                  "baseline": dict(n_layer=72, n_embd=1024)},
+        "tiny": {"ours": dict(n_layer=2, n_embd=128), "baseline": dict(n_layer=4, n_embd=128)},
+        "scaled": {"ours": dict(n_layer=4, n_embd=192), "baseline": dict(n_layer=8, n_embd=192)},
+        "small": {"ours": dict(n_layer=8, n_embd=320), "baseline": dict(n_layer=24, n_embd=320)},
+        "medium": {"ours": dict(n_layer=12, n_embd=512), "baseline": dict(n_layer=36, n_embd=512)},
+        "0.5B": {"ours": dict(n_layer=24, n_embd=1024), "baseline": dict(n_layer=72, n_embd=1024)},
     }
 
     @classmethod
@@ -433,10 +477,17 @@ class LLMConfig:
         return cfg
 
 
-def build_llm(variant: str = "ours", preset: str = "small", lln: str = "StableLiquidLN", **overrides: Any) -> nn.Module:
+def build_llm(
+    variant: str = "ours",
+    preset: str = "small",
+    lln: str = "StableLiquidLN",
+    lora_alpha: float = 1.0,
+    **overrides: Any,
+) -> nn.Module:
     """Build an LLM of the requested variant at a shared parameter budget."""
     overrides.setdefault("variant", variant)
     overrides["lln"] = lln
+    overrides["lora_alpha"] = lora_alpha
     cfg = LLMConfig.from_preset(preset, **overrides)
     model = LiquidGDNCondLLM(cfg) if variant == "ours" else GDN2BaselineLLM(cfg)
     return model

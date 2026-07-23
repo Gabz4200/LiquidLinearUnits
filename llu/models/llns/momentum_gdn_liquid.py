@@ -51,8 +51,7 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        r"""__init__(in_features, out_features, rank=4, initial_decay_rate=0.8, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None
-        """
+        r"""__init__(in_features, out_features, rank=4, initial_decay_rate=0.8, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None"""
         _validate_parameterization(parameterization)
 
         super().__init__(
@@ -92,7 +91,9 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         )
 
         # Output projection from GDN-2 features to low-rank factors or scale
-        proj_out_dim = rank if self.parameterization == "svd" else rank * (out_features + in_features)
+        proj_out_dim = (
+            rank if self.parameterization == "svd" else rank * (out_features + in_features)
+        )
         self.proj_out = nn.Linear(
             in_features,
             proj_out_dim,
@@ -124,7 +125,9 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         self.gdn2.apply(self.gdn2._initialize_weights)
 
         if self.parameterization == "lora":
-            self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
+            self._init_low_rank_adaptive(
+                self.proj_out, self.rank * self.out_features, rank=self.rank
+            )
         else:
             self._init_svd_projection(self.proj_out)
 
@@ -136,8 +139,7 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         past_key_values: Optional[Any] = None,
         use_cache: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
-        r"""forward(x, cond=None, attention_mask=None, past_key_values=None, use_cache=False) -> Tensor or (Tensor, Cache)
-        """
+        r"""forward(x, cond=None, attention_mask=None, past_key_values=None, use_cache=False) -> Tensor or (Tensor, Cache)"""
         cond = cond if cond is not None else x
 
         # RMSNorm for magnitude invariance
@@ -183,9 +185,11 @@ class MomentumGDNLiquidLN(BaseMomentumLLU):
         return out
 
     def extra_repr(self) -> str:
+        decay = self.decay_rate
+        decay_val = f"{decay.item():.4f}" if decay.numel() == 1 else str(decay.shape)
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"gdn_mode={self.gdn2.mode}, decay_rate={self.decay_rate.item():.4f}, "
+            f"gdn_mode={self.gdn2.mode}, decay_rate={decay_val}, "
             f"mode={self.parameterization}"
         )

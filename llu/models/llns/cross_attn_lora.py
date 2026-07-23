@@ -33,6 +33,7 @@ from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
+    _ensure_3d,
     _small_init,
     _zero_out_last,
     _validate_parameterization,
@@ -70,9 +71,10 @@ class CrossAttnLoraLN(BaseLLU):
         cond_dim: Optional[int] = None,
         init_method: str = "xavier",
         parameterization: str = "lora",
+        lora_alpha: float = 1.0,
         attn_dim: int = 32,
         attn_heads: int = 2,
-        attn_activation: str = "gelu",
+        attn_activation: str = "silu",
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -109,8 +111,8 @@ class CrossAttnLoraLN(BaseLLU):
             attn_heads (int): number of attention heads in the cross-attention
                 block. Default: ``2``.
             attn_activation (str): non-linearity of the decoder feed-forward
-                sublayer. One of ``"relu"``, ``"gelu"``, ``"silu"``.
-                Default: ``"gelu"``.
+                sublayer. One of ``"silu"``, ``"gelu"``.
+                Default: ``"silu"``.
             device (torch.device, optional): the desired device of the
                 parameters. Default: ``None``.
             dtype (torch.dtype): the desired data type of the parameters.
@@ -136,6 +138,7 @@ class CrossAttnLoraLN(BaseLLU):
         self.normalize_input = normalize_input
         self.cond_dim = cond_dim if cond_dim is not None else in_features
         self.parameterization = parameterization
+        self.lora_alpha = lora_alpha
 
         # Make attn_dim divisible by attn_heads (and non-zero).
         attn_heads = max(1, int(attn_heads))
@@ -148,12 +151,8 @@ class CrossAttnLoraLN(BaseLLU):
         # --- The two learned low-rank factor matrices (LoRA-style). ---
         # mat_o lives in the out_features space (A in lora, U in svd);
         # mat_i lives in the in_features space (B in lora, V in svd).
-        self.mat_o = nn.Parameter(
-            torch.empty(self.rank, out_features, device=dev, dtype=dtype)
-        )
-        self.mat_i = nn.Parameter(
-            torch.empty(self.rank, in_features, device=dev, dtype=dtype)
-        )
+        self.mat_o = nn.Parameter(torch.empty(self.rank, out_features, device=dev, dtype=dtype))
+        self.mat_i = nn.Parameter(torch.empty(self.rank, in_features, device=dev, dtype=dtype))
 
         # --- Cross-attention refiner. ---
         # Project the two factor matrices into the shared attention space to
@@ -168,7 +167,7 @@ class CrossAttnLoraLN(BaseLLU):
         self.w_o = nn.Linear(attn_dim, out_features, bias=True, device=dev, dtype=dtype)
         self.w_i = nn.Linear(attn_dim, in_features, bias=True, device=dev, dtype=dtype)
 
-        act = {"relu": nn.ReLU, "gelu": nn.GELU, "silu": nn.SiLU}[attn_activation]
+        act = {"silu": nn.SiLU, "gelu": nn.GELU}[attn_activation]
         self.decoder = nn.TransformerDecoderLayer(
             d_model=attn_dim,
             nhead=attn_heads,
@@ -220,9 +219,7 @@ class CrossAttnLoraLN(BaseLLU):
           ``mat_i``'s refiner.
         * The dynamic-bias MLP is small-init with a zeroed final layer.
         """
-        gain = {"hyperfan_in": 0.02, "hyperfan_out": 0.02, "small": 0.02}.get(
-            self.init_method, 1.0
-        )
+        gain = {"hyperfan_in": 0.02, "hyperfan_out": 0.02, "small": 0.02}.get(self.init_method, 1.0)
         nn.init.xavier_uniform_(self.mat_o, gain=gain)
         nn.init.zeros_(self.mat_i)
 
@@ -260,20 +257,15 @@ class CrossAttnLoraLN(BaseLLU):
             Tensor: output tensor of shape ``(..., out_features)``.
         """
         in_shape = x.shape
-        xw = x if x.dim() >= 3 else (x.reshape(1, 1, -1) if x.dim() == 1 else x.unsqueeze(1))
-        feat_in = xw.shape[-1]
-        lead = xw.shape[:-2]
-        Bf = 1
-        for d in lead:
-            Bf *= int(d)
-        T = xw.shape[-2]
-        x3d = xw.reshape(Bf, T, feat_in)
+        x3d, _ = _ensure_3d(x)
+        Bf, T, feat_in = x3d.shape
 
         c = cond if cond is not None else x
-        cw = c if c.dim() >= 3 else (c.reshape(1, 1, -1) if c.dim() == 1 else c.unsqueeze(1))
-        C = cw.shape[-1]
-        Tc = cw.shape[-2]
-        c3d = cw.reshape(Bf, Tc, C)
+        c3d, _ = _ensure_3d(c)
+        Bf_c, Tc, C = c3d.shape
+        Bf = max(Bf, Bf_c)
+        if Bf_c == 1 and Bf > 1:
+            c3d = c3d.expand(Bf, -1, -1)
 
         if self.normalize_input:
             c_norm = F.rms_norm(c3d, (C,))
@@ -305,10 +297,12 @@ class CrossAttnLoraLN(BaseLLU):
             v = torch.einsum("bti,bri->btr", x3d, b)  # (Bf, T, R)
             adaptive3d = torch.einsum("btr,r,bro->bto", v, self.g, a)  # (Bf, T, O)
 
-        out3d = self.linear_core(x3d) + adaptive3d
+        lora_scale = self.lora_alpha / self.rank
+
+        out3d = self.linear_core(x3d) + lora_scale * adaptive3d
 
         if self.bias_dynamic is not None:
-            bias3d = self.bias_dynamic(c_norm)[:, :T, :]  # (Bf, T, O)
+            bias3d = self.bias_dynamic(c_norm)[:, :T, :]
             out3d = out3d + bias3d
 
         return out3d.reshape(*in_shape[:-1], self.out_features)
@@ -318,5 +312,5 @@ class CrossAttnLoraLN(BaseLLU):
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
             f"attn_dim={self.attn_dim}, attn_heads={self.attn_heads}, "
-            f"mode={self.parameterization}"
+            f"mode={self.parameterization}, lora_alpha={self.lora_alpha}"
         )
