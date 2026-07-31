@@ -45,13 +45,14 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from bench_tasks import TASKS, compute_metric, loss_fn, make_task
+
 from llu.models.liquid_model import (
-    build_model,
     ARCH_FACTORIES,
-    is_valid_arch,
     RECURRENT_ARCHS,
+    build_model,
+    is_valid_arch,
 )
-from bench_tasks import TASKS, make_task, loss_fn, compute_metric
 
 ALL_ARCHS = list(ARCH_FACTORIES.keys())
 
@@ -60,18 +61,29 @@ ALL_ARCHS = list(ARCH_FACTORIES.keys())
 # One (architecture, task, sweep) run
 # ---------------------------------------------------------------------------
 
+
 def run_one(arch: str, task, d_model: int, out_dim: int, cfg: dict, data_seed: int) -> dict:
     device = cfg["device"]
     torch.manual_seed(cfg["seed"])
 
     model = build_model(
-        arch, d_model, out_dim,
-        num_layers=cfg["num_layers"], window=cfg["window"], n_heads=cfg["n_heads"],
-        use_swiglu=cfg["use_swiglu"], swiglu_mult=cfg["swiglu_mult"],
-        rank=cfg["rank"], decay_rate=cfg["decay_rate"],
+        arch,
+        d_model,
+        out_dim,
+        num_layers=cfg["num_layers"],
+        window=cfg["window"],
+        n_heads=cfg["n_heads"],
+        use_swiglu=cfg["use_swiglu"],
+        swiglu_mult=cfg["swiglu_mult"],
+        rank=cfg["rank"],
+        decay_rate=cfg["decay_rate"],
         use_attention=cfg["use_attention"],
         parameterization=cfg["parameterization"],
-        lln_attn_dim=cfg["lln_attn_dim"], lln_attn_heads=cfg["lln_attn_heads"],
+        lln_attn_dim=cfg["lln_attn_dim"],
+        lln_attn_heads=cfg["lln_attn_heads"],
+        use_engram=cfg.get("use_engram", False),
+        engram_mode=cfg.get("engram_mode", "cond"),
+        engram_storage=cfg.get("engram_storage", "auto"),
     )
     model.to(device)
     n_params = model.num_params()
@@ -137,12 +149,14 @@ def run_one(arch: str, task, d_model: int, out_dim: int, cfg: dict, data_seed: i
 # Report formatting
 # ---------------------------------------------------------------------------
 
+
 def _fmt(v, w, kind="f"):
     if isinstance(v, float):
         if not math.isfinite(v):
             return f"{'nan':>{w}}"
         return f"{v:{w}.4g}"
-    return f"{str(v):>{w}}"
+    return f"{v!s:>{w}}"
+
 
 def write_report(results: list[dict], cfg: dict, path: str) -> None:
     lines: list[str] = []
@@ -156,9 +170,15 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
     A(f"  archs        : {', '.join(cfg['archs'])}")
     A(f"  tasks        : {', '.join(cfg['tasks'])}")
     A(f"  sweeps       : {'on' if cfg['sweeps'] else 'off'}")
-    A(f"  use_attention : {cfg.get('use_attention', True)}   ablate_attention : {cfg.get('ablate_attention', False)}")
-    A(f"  steps        : {cfg['steps']}   batch : {cfg['batch']}   eval_batch : {cfg['eval_batch']}")
-    A(f"  num_layers   : {cfg['num_layers']}   window : {cfg['window']}   n_heads : {cfg['n_heads']}")
+    A(
+        f"  use_attention : {cfg.get('use_attention', True)}   ablate_attention : {cfg.get('ablate_attention', False)}"
+    )
+    A(
+        f"  steps        : {cfg['steps']}   batch : {cfg['batch']}   eval_batch : {cfg['eval_batch']}"
+    )
+    A(
+        f"  num_layers   : {cfg['num_layers']}   window : {cfg['window']}   n_heads : {cfg['n_heads']}"
+    )
     A(f"  use_swiglu   : {cfg['use_swiglu']}   swiglu_mult : {cfg['swiglu_mult']}")
     A(f"  rank         : {cfg['rank']}   decay_rate : {cfg['decay_rate']}   lr : {cfg['lr']}")
     A(f"  lln_attn_dim : {cfg['lln_attn_dim']}   lln_attn_heads : {cfg['lln_attn_heads']}")
@@ -174,8 +194,10 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
         A("-" * 72)
         A(f"TASK {task_name}")
         A("-" * 72)
-        hdr = (f"{'arch':30s} {'params':>10s} {'tr_loss':>9s} {'ev_loss':>9s} "
-               f"{'metric':>40s} {'ms/step':>8s} {'st/s':>7s}")
+        hdr = (
+            f"{'arch':30s} {'params':>10s} {'tr_loss':>9s} {'ev_loss':>9s} "
+            f"{'metric':>40s} {'ms/step':>8s} {'st/s':>7s}"
+        )
         A(hdr)
         A("-" * 72)
         for r in rows:
@@ -183,9 +205,11 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
             mstr = " ".join(f"{k}={v:.3g}" for k, v in m.items()) if m else "-"
             if r["ceiling"]:
                 mstr += " " + " ".join(f"{k}={v:.3g}" for k, v in r["ceiling"].items())
-            A(f"{r['arch']:30s} {r['params']:>10d} "
-              f"{_fmt(r['final_train_loss'], 9)} {_fmt(r['final_eval_loss'], 9)} "
-              f"{mstr:>22s} {_fmt(r['ms_per_step'], 8)} {_fmt(r['steps_per_sec'], 7)}")
+            A(
+                f"{r['arch']:30s} {r['params']:>10d} "
+                f"{_fmt(r['final_train_loss'], 9)} {_fmt(r['final_eval_loss'], 9)} "
+                f"{mstr:>22s} {_fmt(r['ms_per_step'], 8)} {_fmt(r['steps_per_sec'], 7)}"
+            )
             if r["notes"]:
                 A(f"    ! {r['notes']}")
         A("")
@@ -202,14 +226,14 @@ def write_report(results: list[dict], cfg: dict, path: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> dict:
     p = argparse.ArgumentParser(description="LLU synthetic sequence benchmark")
-    p.add_argument("--archs", default=",".join(ALL_ARCHS),
-                   help="comma-separated architectures")
-    p.add_argument("--tasks", default=",".join(TASKS.keys()),
-                   help="comma-separated task names")
-    p.add_argument("--d_model", type=int, default=None,
-                   help="override model dim (default: task.token_dim)")
+    p.add_argument("--archs", default=",".join(ALL_ARCHS), help="comma-separated architectures")
+    p.add_argument("--tasks", default=",".join(TASKS.keys()), help="comma-separated task names")
+    p.add_argument(
+        "--d_model", type=int, default=None, help="override model dim (default: task.token_dim)"
+    )
     p.add_argument("--num_layers", type=int, default=2)
     p.add_argument("--window", type=int, default=16)
     p.add_argument("--n_heads", type=int, default=4)
@@ -218,10 +242,18 @@ def parse_args() -> dict:
     p.add_argument("--swiglu_mult", type=int, default=4)
     p.add_argument("--rank", type=int, default=4)
     p.add_argument("--decay_rate", type=float, default=0.4)
-    p.add_argument("--lln_attn_dim", type=int, default=32,
-                   help="cross-attn dim for CrossAttnLoraLN (ignored by other archs)")
-    p.add_argument("--lln_attn_heads", type=int, default=2,
-                   help="cross-attn heads for CrossAttnLoraLN (ignored by other archs)")
+    p.add_argument(
+        "--lln_attn_dim",
+        type=int,
+        default=32,
+        help="cross-attn dim for CrossAttnLoraLN (ignored by other archs)",
+    )
+    p.add_argument(
+        "--lln_attn_heads",
+        type=int,
+        default=2,
+        help="cross-attn heads for CrossAttnLoraLN (ignored by other archs)",
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--steps", type=int, default=300)
     p.add_argument("--batch", type=int, default=32)
@@ -231,14 +263,38 @@ def parse_args() -> dict:
     p.add_argument("--out", default="synth_bench_report.txt")
     p.add_argument("--sweeps", dest="sweeps", action="store_true", default=True)
     p.add_argument("--no_sweeps", dest="sweeps", action="store_false")
-    p.add_argument("--parameterization", default="lora", choices=["lora", "svd"],
-                   help="parameterization mode for low-rank updates")
-    p.add_argument("--no_attention", action="store_true",
-                   help="build every selected architecture with attention removed")
-    p.add_argument("--ablate_attention", action="store_true",
-                   help="compare recurrent archs with and without attention, plus the others")
-    p.add_argument("--quick", action="store_true",
-                   help="tiny config for a fast smoke test")
+    p.add_argument(
+        "--parameterization",
+        default="lora",
+        choices=["lora", "svd"],
+        help="parameterization mode for low-rank updates",
+    )
+    p.add_argument(
+        "--use_engram", action="store_true", help="Enable DeepSeek Engram conditional memory"
+    )
+    p.add_argument(
+        "--engram_mode",
+        default="cond",
+        choices=["cond", "additive", "both"],
+        help="Engram retrieval routing mode",
+    )
+    p.add_argument(
+        "--engram_storage",
+        default="auto",
+        choices=["auto", "cpu", "disk", "cuda"],
+        help="Engram embedding storage backend",
+    )
+    p.add_argument(
+        "--no_attention",
+        action="store_true",
+        help="build every selected architecture with attention removed",
+    )
+    p.add_argument(
+        "--ablate_attention",
+        action="store_true",
+        help="compare recurrent archs with and without attention, plus the others",
+    )
+    p.add_argument("--quick", action="store_true", help="tiny config for a fast smoke test")
     a = p.parse_args()
 
     if a.quick:
@@ -252,15 +308,30 @@ def parse_args() -> dict:
         archs=[s for s in a.archs.split(",") if s],
         tasks=[s for s in a.tasks.split(",") if s],
         d_model_override=a.d_model,
-        num_layers=a.num_layers, window=a.window, n_heads=a.n_heads,
-        use_swiglu=a.use_swiglu, swiglu_mult=a.swiglu_mult,
-        rank=a.rank, decay_rate=a.decay_rate, lr=a.lr,
-        lln_attn_dim=a.lln_attn_dim, lln_attn_heads=a.lln_attn_heads,
-        steps=a.steps, batch=a.batch, eval_batch=a.eval_batch,
-        seed=a.seed, device=a.device, out=a.out,
-        sweeps=a.sweeps, quick=a.quick,
-        use_attention=not a.no_attention, ablate_attention=a.ablate_attention,
+        num_layers=a.num_layers,
+        window=a.window,
+        n_heads=a.n_heads,
+        use_swiglu=a.use_swiglu,
+        swiglu_mult=a.swiglu_mult,
+        rank=a.rank,
+        decay_rate=a.decay_rate,
+        lr=a.lr,
+        lln_attn_dim=a.lln_attn_dim,
+        lln_attn_heads=a.lln_attn_heads,
+        steps=a.steps,
+        batch=a.batch,
+        eval_batch=a.eval_batch,
+        seed=a.seed,
+        device=a.device,
+        out=a.out,
+        sweeps=a.sweeps,
+        quick=a.quick,
+        use_attention=not a.no_attention,
+        ablate_attention=a.ablate_attention,
         parameterization=a.parameterization,
+        use_engram=a.use_engram,
+        engram_mode=a.engram_mode,
+        engram_storage=a.engram_storage,
     )
     return cfg
 
@@ -285,8 +356,10 @@ def main() -> None:
             sweep_label = ",".join(f"{k}={v}" for k, v in sweep.items())
             d_model = cfg["d_model_override"] or task.token_dim
             out_dim = task.out_dim
-            data_seed = (abs(hash((task_name, tuple(sorted(sweep.items()))))) % (2 ** 31))
-            print(f"\n=== TASK {task_name}  sweep=[{sweep_label}]  d_model={d_model} out_dim={out_dim} ===")
+            data_seed = abs(hash((task_name, tuple(sorted(sweep.items()))))) % (2**31)
+            print(
+                f"\n=== TASK {task_name}  sweep=[{sweep_label}]  d_model={d_model} out_dim={out_dim} ==="
+            )
             for arch in cfg["archs"]:
                 if not is_valid_arch(arch):
                     print(f"[skip] unknown arch {arch}")
@@ -294,9 +367,11 @@ def main() -> None:
                 r = run_one(arch, task, d_model, out_dim, cfg, data_seed)
                 m = r["metric"]
                 mstr = " ".join(f"{k}={v:.3g}" for k, v in m.items())
-                print(f"  {arch:26s} params={r['params']:>9d} "
-                      f"tr={r['final_train_loss']:.4g} ev={r['final_eval_loss']:.4g} "
-                      f"{mstr} {r['ms_per_step']:.1f} ms/step")
+                print(
+                    f"  {arch:26s} params={r['params']:>9d} "
+                    f"tr={r['final_train_loss']:.4g} ev={r['final_eval_loss']:.4g} "
+                    f"{mstr} {r['ms_per_step']:.1f} ms/step"
+                )
                 r["task"] = task_name
                 r["sweep_label"] = sweep_label
                 r["sweep"] = sweep

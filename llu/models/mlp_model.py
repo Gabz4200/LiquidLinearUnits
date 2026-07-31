@@ -18,15 +18,15 @@ from __future__ import annotations
 import inspect
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from .llns import (
-    StableLiquidLN,
+    BatchMomentumLiquidLN,
+    FactorizedBatchMomentumLiquidLN,
     FactorizedLiquidLN,
     RankRLiquidLN,
     SharedMomentumLiquidLN,
-    BatchMomentumLiquidLN,
-    FactorizedBatchMomentumLiquidLN,
+    StableLiquidLN,
 )
 
 # Plain LLU variants that make sense as static linear maps. ``CrossAttnLoraLN``
@@ -138,4 +138,4 @@ class LiquidMLP(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-__all__ = ["LiquidMLP", "IO_LLN_REGISTRY"]
+__all__ = ["IO_LLN_REGISTRY", "LiquidMLP"]

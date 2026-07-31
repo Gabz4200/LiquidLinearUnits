@@ -1,9 +1,9 @@
 r"""Rank1LiquidLN: rank-1 adaptive factors."""
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseLLU
 from .utils import (
@@ -32,7 +32,7 @@ class Rank1LiquidLN(BaseLLU):
         scale_init: float = 0.9,
         normalize_input: bool = False,
         init_method: str = "hyperfan_in",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
@@ -82,7 +82,7 @@ class Rank1LiquidLN(BaseLLU):
             dtype=dtype,
         )
 
-        self.bias_dynamic: Optional[nn.Linear] = (
+        self.bias_dynamic: nn.Linear | None = (
             nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
             if dynamic_bias
             else None

@@ -1,8 +1,8 @@
 r"""LiquidLinear: input-conditioned full weight matrix."""
 
+
 import torch
-import torch.nn as nn
-from typing import Optional
+from torch import nn
 
 from .base import BaseLLU
 from .utils import (
@@ -32,7 +32,7 @@ class LiquidLinear(BaseLLU):
         factor_activation: str = "tanh",
         scale_init: float = 0.9,
         init_method: str = "hyperfan_in",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, bias=True, dynamic_bias=True, factor_activation="tanh", scale_init=0.9, init_method="hyperfan_in", device=None, dtype=torch.float32) -> None
@@ -80,7 +80,7 @@ class LiquidLinear(BaseLLU):
         )
 
         # Optional input‑dependent bias
-        self.bias_dynamic: Optional[nn.Linear] = (
+        self.bias_dynamic: nn.Linear | None = (
             nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
             if dynamic_bias
             else None

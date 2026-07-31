@@ -16,7 +16,6 @@ import math
 import os
 import sys
 import time
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,7 +24,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-from llu.models.liquid_llm import build_llm, num_params, LLN_REGISTRY
+from llu.models.liquid_llm import LLN_REGISTRY, build_llm, num_params
 
 
 def _require_internet() -> None:
@@ -151,6 +150,9 @@ def train_one(args, variant, lln_name, parameterization, device, tok):
         args.preset,
         lln=lln_name or "StableLiquidLN",
         parameterization=parameterization,
+        use_engram=getattr(args, "use_engram", False),
+        engram_mode=getattr(args, "engram_mode", "cond"),
+        engram_storage=getattr(args, "engram_storage", "auto"),
     ).to(device)
     n_params = num_params(model)
 
@@ -231,9 +233,9 @@ def train_one(args, variant, lln_name, parameterization, device, tok):
     }
     if args.eval:
         reset_momentum_buffers(model)
-        print(f"  [eval] Wiki ppl ...")
+        print("  [eval] Wiki ppl ...")
         metrics["wiki_ppl"] = wiki_ppl(model, tok, device, args.seq_len, args.wiki_tokens)
-        print(f"  [eval] LAMBADA ...")
+        print("  [eval] LAMBADA ...")
         lmb_ppl, lmb_acc = lambada_eval(model, tok, device, args.seq_len, args.lambada_ex)
         metrics["lmb_ppl"] = lmb_ppl
         metrics["lmb_acc"] = lmb_acc
@@ -267,8 +269,10 @@ def write_report(results, args):
     lines = [
         "# LLM Benchmark: All Intermediary LLNs × Parameterizations",
         "",
-        f"Preset `{args.preset}`, {args.tokens:,} tokens, seq_len {args.seq_len}, "
-        f"batch {args.batch}, lr {args.lr}, max_steps {args.max_steps or 'all'}.",
+        (
+            f"Preset `{args.preset}`, {args.tokens:,} tokens, seq_len {args.seq_len}, "
+            f"batch {args.batch}, lr {args.lr}, max_steps {args.max_steps or 'all'}."
+        ),
         f"Early stop patience: {args.early_stop_patience or 'disabled'}.",
         "",
         "Lower ppl is better; higher acc is better.",
@@ -358,6 +362,21 @@ def main():
         "--parametrizations", default="svd,lora", help="Comma-separated parametrizations to test"
     )
     p.add_argument("--skip_baseline", action="store_true")
+    p.add_argument(
+        "--use_engram", action="store_true", help="Enable DeepSeek Engram conditional memory"
+    )
+    p.add_argument(
+        "--engram_mode",
+        default="cond",
+        choices=["cond", "additive", "both"],
+        help="Engram retrieval routing mode",
+    )
+    p.add_argument(
+        "--engram_storage",
+        default="auto",
+        choices=["auto", "cpu", "disk", "cuda"],
+        help="Engram embedding storage backend",
+    )
     a = p.parse_args()
 
     os.makedirs(a.ckpt_dir, exist_ok=True)

@@ -1,8 +1,7 @@
-import torch
 import pytest
+import torch
 
 from llu.models.llns.cross_attn_lora import CrossAttnLoraLN
-
 
 # =============================================================================
 # INITIALISATION EQUIVALENCE (adaptive path must be zero at step 1)

@@ -24,22 +24,23 @@ SWA uses ``F.scaled_dot_product_attention`` with a sliding-window causal mask.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
 import inspect
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
+from .engram import Engram, EngramConfig
 from .gdn2 import GatedDeltaNet2
 from .llns import (
-    StableLiquidLN,
-    CrossAttnLoraLN,
-    SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
-    FactorizedLiquidLN,
+    CrossAttnLoraLN,
     FactorizedBatchMomentumLiquidLN,
+    FactorizedLiquidLN,
+    SharedMomentumLiquidLN,
+    StableLiquidLN,
 )
 
 # Intermediary LLN classes that can sit between the SWA/X mixer and the
@@ -261,11 +262,28 @@ class LiquidGDNCondBlock(nn.Module):
     cross-attention over the GDN-2 ``cond`` sequence).
     """
 
-    def __init__(self, cfg: "LLMConfig") -> None:
+    def __init__(self, cfg: LLMConfig, layer_idx: int = 0) -> None:
         super().__init__()
         d, H, w = cfg.n_embd, cfg.n_head, cfg.window
         inter = int(d * cfg.inter_mult)
         self.parallel = cfg.parallel_residual
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+
+        self.engram: Engram | None = None
+        if cfg.use_engram and (cfg.engram_layer_ids is None or layer_idx in cfg.engram_layer_ids):
+            engram_cfg = EngramConfig(
+                layer_ids=[layer_idx],
+                storage_backend=cfg.engram_storage,
+                engram_mode=cfg.engram_mode,
+                tokenizer_name_or_path=cfg.tokenizer_name_or_path,
+            )
+            self.engram = Engram(
+                layer_id=layer_idx,
+                cfg=engram_cfg,
+                hidden_size=d,
+                storage_backend=cfg.engram_storage,
+            )
 
         self.norm1 = nn.RMSNorm(d)
         self.swa = SlidingWindowAttention(d, H, w)
@@ -305,10 +323,22 @@ class LiquidGDNCondBlock(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         n1 = self.norm1(x)
         X = self.swa(n1, cos, sin)
         Cond = self.gdn2(n1)[0]
+        if self.engram is not None and input_ids is not None:
+            engram_out, engram_cond = self.engram(n1, input_ids)
+            if self.cfg.engram_mode in ("additive", "both"):
+                X = X + engram_out
+            if self.cfg.engram_mode in ("cond", "both"):
+                Cond = engram_cond
         h = self.inter(X, Cond)
         if self.parallel:
             x = x + h + self.mlp(n1)
@@ -321,10 +351,27 @@ class LiquidGDNCondBlock(nn.Module):
 class GDN2BaselineBlock(nn.Module):
     """lit_gpt-style block: GDN-2 mixer (no attention) + SwiGLU FFN."""
 
-    def __init__(self, cfg: "LLMConfig") -> None:
+    def __init__(self, cfg: LLMConfig, layer_idx: int = 0) -> None:
         super().__init__()
         d, H = cfg.n_embd, cfg.n_head
         self.parallel = cfg.parallel_residual
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+
+        self.engram: Engram | None = None
+        if cfg.use_engram and (cfg.engram_layer_ids is None or layer_idx in cfg.engram_layer_ids):
+            engram_cfg = EngramConfig(
+                layer_ids=[layer_idx],
+                storage_backend=cfg.engram_storage,
+                engram_mode=cfg.engram_mode,
+                tokenizer_name_or_path=cfg.tokenizer_name_or_path,
+            )
+            self.engram = Engram(
+                layer_id=layer_idx,
+                cfg=engram_cfg,
+                hidden_size=d,
+                storage_backend=cfg.engram_storage,
+            )
         self.norm1 = nn.RMSNorm(d)
         self.gdn2 = GatedDeltaNet2(
             hidden_size=d,
@@ -342,9 +389,18 @@ class GDN2BaselineBlock(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         n1 = self.norm1(x)
         h = self.gdn2(n1)[0]
+        if self.engram is not None and input_ids is not None:
+            engram_out, _ = self.engram(n1, input_ids)
+            h = h + engram_out
         if self.parallel:
             x = x + h + self.mlp(n1)
         else:
@@ -366,7 +422,7 @@ class LiquidGDNCondLLM(nn.Module):
     cross-attention over the GDN-2 conditioning stream).
     """
 
-    def __init__(self, cfg: "LLMConfig") -> None:
+    def __init__(self, cfg: LLMConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
@@ -374,7 +430,9 @@ class LiquidGDNCondLLM(nn.Module):
         # explode (init CE ~300, training never recovers). Scale to
         # 1/sqrt(n_embd) so logits start at unit scale and init CE ~= ln(vocab).
         nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd**0.5))
-        self.blocks = nn.ModuleList([LiquidGDNCondBlock(cfg) for _ in range(cfg.n_layer)])
+        self.blocks = nn.ModuleList(
+            [LiquidGDNCondBlock(cfg, layer_idx=i) for i in range(cfg.n_layer)]
+        )
         self.ln_f = nn.RMSNorm(cfg.n_embd)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_embed:
@@ -388,7 +446,7 @@ class LiquidGDNCondLLM(nn.Module):
         x = self.wte(idx)
         cos, sin = self.rope(T, x.device)
         for blk in self.blocks:
-            x = blk(x, cos, sin)
+            x = blk(x, cos, sin, input_ids=idx)
         x = self.ln_f(x)
         return self.lm_head(x)
 
@@ -396,7 +454,7 @@ class LiquidGDNCondLLM(nn.Module):
 class GDN2BaselineLLM(nn.Module):
     """Reference GDN-2 LLM (GDN-2 as the mixer, no attention)."""
 
-    def __init__(self, cfg: "LLMConfig") -> None:
+    def __init__(self, cfg: LLMConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
@@ -404,7 +462,9 @@ class GDN2BaselineLLM(nn.Module):
         # explode (init CE ~300, training never recovers). Scale to
         # 1/sqrt(n_embd) so logits start at unit scale and init CE ~= ln(vocab).
         nn.init.normal_(self.wte.weight, mean=0.0, std=1.0 / (cfg.n_embd**0.5))
-        self.blocks = nn.ModuleList([GDN2BaselineBlock(cfg) for _ in range(cfg.n_layer)])
+        self.blocks = nn.ModuleList(
+            [GDN2BaselineBlock(cfg, layer_idx=i) for i in range(cfg.n_layer)]
+        )
         self.ln_f = nn.RMSNorm(cfg.n_embd)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_embed:
@@ -418,7 +478,7 @@ class GDN2BaselineLLM(nn.Module):
         x = self.wte(idx)
         cos, sin = self.rope(T, x.device)
         for blk in self.blocks:
-            x = blk(x, cos, sin)
+            x = blk(x, cos, sin, input_ids=idx)
         x = self.ln_f(x)
         return self.lm_head(x)
 
@@ -450,6 +510,11 @@ class LLMConfig:
     lln: str = "StableLiquidLN"  # intermediary LLN class name
     lln_attn_dim: int = 32  # CrossAttnLoraLN cross-attn dim
     lln_attn_heads: int = 2  # CrossAttnLoraLN cross-attn heads
+    use_engram: bool = False
+    engram_mode: str = "cond"  # "cond" | "additive" | "both"
+    engram_layer_ids: list[int] | None = None
+    engram_storage: Literal["auto", "cpu", "disk", "cuda"] = "auto"  # "auto" | "cpu" | "disk" | "cuda"
+    tokenizer_name_or_path: str | None = None
 
     # Preset budgets, per architecture. The baseline (GDN-2 mixer, no
     # attention) is cheaper per layer than ``ours`` (which also pays for SWA +
@@ -468,7 +533,7 @@ class LLMConfig:
     }
 
     @classmethod
-    def from_preset(cls, preset: str = "small", **overrides: Any) -> "LLMConfig":
+    def from_preset(cls, preset: str = "small", **overrides: Any) -> LLMConfig:
         variant = overrides.get("variant", "ours")
         cfg = cls(**overrides)
         if preset in cls.PRESETS:
@@ -498,10 +563,10 @@ def num_params(model: nn.Module) -> int:
 
 
 __all__ = [
-    "LLMConfig",
     "LLN_REGISTRY",
-    "LiquidGDNCondLLM",
     "GDN2BaselineLLM",
+    "LLMConfig",
+    "LiquidGDNCondLLM",
     "build_llm",
     "num_params",
 ]

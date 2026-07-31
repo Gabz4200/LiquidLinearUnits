@@ -37,7 +37,7 @@ def GatedDeltaNet2GPU(
     layer_idx: int | None = None,
     norm_eps: float = 1e-5,
     **kwargs: Any,
-) -> "object":
+) -> object:
     """Construct a GPU-optimized GDN-2 layer using ``fla``'s Triton kernels.
 
     The ``fla`` dependency is imported lazily, so this callable is safe to

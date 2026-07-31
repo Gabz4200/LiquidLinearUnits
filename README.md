@@ -36,6 +36,15 @@ the three Stable-Liquid SwiGLU sublayers. SWA still supplies the token-mixed
 With `--no_attention` (or the `_noattn` ablation), SWA is removed entirely and
 the block becomes pure LLU recurrence, with GDN-2 still providing `cond`.
 
+## DeepSeek Engram Conditional N-gram Memory (`llu/models/engram/`)
+
+The repository also includes an implementation of the **DeepSeek Engram** conditional memory architecture (`Engram`, `EngramConfig`, `EngramEmbeddingStore`, `NgramHashMapping`, `CompressedTokenizer`):
+
+- **Deterministic Multi-head N-gram Hashing:** `CompressedTokenizer` maps text morphology into equivalence classes via normalizers; `NgramHashMapping` generates $O(1)$ multi-head coprime N-gram key hashes.
+- **Context-Aware Gating & ShortConv:** `Engram` queries multi-head embedding stores and gates static memory retrievals using RMSNorm-scaled dot-product attention against the hidden state, followed by depthwise 1D causal convolution (`ShortConv`).
+- **Tiered Offloading Backends:** `EngramEmbeddingStore` supports `"auto"`, `"cpu"`, `"disk"` (SSD `np.memmap` binary file offloading in 64k chunks for low-RAM CPU systems), and `"cuda"`.
+- **Conditioning & Additive Routing:** Retried Engram memory can be passed as additive updates (`--engram_mode additive`), fed directly as the `cond` vector to LLU hypernetworks like `StableLiquidLN` (`--engram_mode cond`), or both (`--engram_mode both`).
+
 ## Preliminary benchmark comparison
 
 > **Multi-task, still one seed.** `overwrite_recall` (d_model = 17), `xor`

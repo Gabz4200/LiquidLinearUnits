@@ -45,8 +45,9 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from llu.models.mlp_model import LiquidMLP, IO_LLN_REGISTRY
-from io_tasks import make_task, TASK_FACTORIES
+from io_tasks import TASK_FACTORIES, make_task
+
+from llu.models.mlp_model import IO_LLN_REGISTRY, LiquidMLP
 
 ALL_LLNS = list(IO_LLN_REGISTRY.keys())
 ALL_TASKS = list(TASK_FACTORIES.keys())
@@ -154,7 +155,7 @@ def _fmt(v, w: int) -> str:
         if not math.isfinite(v):
             return f"{'nan':>{w}}"
         return f"{v:>{w}.4f}"
-    return f"{str(v):>{w}}"
+    return f"{v!s:>{w}}"
 
 
 def write_report(results: list[dict], cfg: dict, path: str) -> None:

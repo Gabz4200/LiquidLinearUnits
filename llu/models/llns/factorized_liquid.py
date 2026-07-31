@@ -6,10 +6,10 @@ initialisation.  This yields better gradient flow and ~2x fewer hypernetwork
 parameters compared to the monolithic approach in StableLiquidLN.
 """
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseLLU
 from .utils import (
@@ -43,17 +43,17 @@ class FactorizedLiquidLN(BaseLLU):
         in_features: int,
         out_features: int,
         rank: int = 4,
-        hyper_hidden_dim: Optional[int] = None,
+        hyper_hidden_dim: int | None = None,
         bias: bool = True,
         dynamic_bias: bool = False,
         factor_activation: str = "norm",
         scale_init: float = 0.01,
         normalize_input: bool = True,
-        cond_dim: Optional[int] = None,
+        cond_dim: int | None = None,
         init_method: str = "hyperfan_in",
         parameterization: str = "lora",
         lora_alpha: float = 1.0,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, rank=4, ...) -> None
@@ -121,7 +121,7 @@ class FactorizedLiquidLN(BaseLLU):
             self.proj_b = None
             self._create_svd_factors(dev, dtype)
 
-        self.bias_dynamic: Optional[nn.Module] = (
+        self.bias_dynamic: nn.Module | None = (
             nn.Sequential(
                 nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
@@ -154,7 +154,7 @@ class FactorizedLiquidLN(BaseLLU):
             _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
-    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         cond = cond if cond is not None else x
         h_in = F.rms_norm(cond, (self.cond_dim,)) if self.normalize_input else cond
 

@@ -1,6 +1,8 @@
-import torch
-import pytest
 from typing import Any, cast
+
+import pytest
+import torch
+
 from llu.models.gdn2.gdn2 import GatedDeltaNet2
 
 # =============================================================================

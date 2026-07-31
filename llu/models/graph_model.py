@@ -30,17 +30,16 @@ because its cross-attention source would degenerate to ``cond = x`` here.
 from __future__ import annotations
 
 import inspect
-from typing import Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from .llns import (
-    StableLiquidLN,
+    BatchMomentumLiquidLN,
     RankRLiquidLN,
     SharedMomentumLiquidLN,
-    BatchMomentumLiquidLN,
+    StableLiquidLN,
 )
 
 # Plain LLU variants that are sensible as graph linear maps.
@@ -149,7 +148,7 @@ class GraphLiquidNet(nn.Module):
         return bias
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, node_mask: torch.Tensor,
-                readout: Optional[str] = None) -> torch.Tensor:
+                readout: str | None = None) -> torch.Tensor:
         # x: (B, N, node_dim) ; adj: (B, N, N) ; node_mask: (B, N)
         mode = readout or self.readout_mode
         h = self.embed(x)
@@ -177,4 +176,4 @@ class GraphLiquidNet(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-__all__ = ["GraphLiquidNet", "GRAPH_LLN_REGISTRY"]
+__all__ = ["GRAPH_LLN_REGISTRY", "GraphLiquidNet"]

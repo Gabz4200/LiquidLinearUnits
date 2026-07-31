@@ -32,9 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
+from bench_tasks import TASKS, compute_metric, loss_fn, make_task
 
-from llu.models.liquid_model import build_model, ARCH_FACTORIES, is_valid_arch, RECURRENT_ARCHS
-from bench_tasks import TASKS, make_task, loss_fn, compute_metric
+from llu.models.liquid_model import ARCH_FACTORIES, RECURRENT_ARCHS, build_model, is_valid_arch
 
 ALL_ARCHS = list(ARCH_FACTORIES.keys())
 
@@ -125,7 +125,7 @@ def _fmt(v, w, kind="f"):
         if not math.isfinite(v):
             return f"{'nan':>{w}}"
         return f"{v:{w}.4g}"
-    return f"{str(v):>{w}}"
+    return f"{v!s:>{w}}"
 
 
 def write_report(results: list[dict], cfg: dict, path: str) -> None:

@@ -1,11 +1,12 @@
-import torch
 import pytest
+import torch
+
 from llu.models.llns import (
-    RankRLiquidLN,
-    GDNLiquidLN,
-    SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
+    GDNLiquidLN,
     MomentumGDNLiquidLN,
+    RankRLiquidLN,
+    SharedMomentumLiquidLN,
 )
 
 

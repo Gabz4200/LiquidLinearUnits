@@ -22,12 +22,12 @@ gate `w` on the value axis.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Literal, cast, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from torch import nn
 
 if TYPE_CHECKING:
     from typing_extensions import Unpack
@@ -522,14 +522,14 @@ class GatedDeltaNet2(nn.Module):
         self.A_log = nn.Parameter(
             torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16))
         )
-        setattr(self.A_log, "_no_weight_decay", True)
+        self.A_log._no_weight_decay = True
         dt = torch.exp(
             torch.rand(self.key_dim, dtype=torch.float32) * (math.log(0.1) - math.log(0.001))
             + math.log(0.001)
         ).clamp(min=1e-4)
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
-        setattr(self.dt_bias, "_no_weight_decay", True)
+        self.dt_bias._no_weight_decay = True
 
         # Output path: SiLU-gated RMS norm followed by the output projection.
         self.g_proj = nn.Sequential(

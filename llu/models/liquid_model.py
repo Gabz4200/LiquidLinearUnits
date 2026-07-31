@@ -28,26 +28,26 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Any, Optional
+from typing import Any, Literal
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
+from .engram import Engram, EngramConfig
 from .llns import (
+    BatchMomentumLiquidLN,
+    CrossAttnLoraLN,
+    FactorizedBatchMomentumLiquidLN,
+    FactorizedLiquidLN,
+    GDNLiquidLN,
     LiquidLinear,
+    MomentumGDNLiquidLN,
     Rank1LiquidLN,
     RankRLiquidLN,
-    StableLiquidLN,
-    FactorizedLiquidLN,
     SharedMomentumLiquidLN,
-    BatchMomentumLiquidLN,
-    FactorizedBatchMomentumLiquidLN,
-    GDNLiquidLN,
-    MomentumGDNLiquidLN,
-    CrossAttnLoraLN,
+    StableLiquidLN,
 )
-
 
 # ---------------------------------------------------------------------------
 # LLU registry / helpers
@@ -183,20 +183,20 @@ class _GDNCache:
 
     def __init__(self, layer_idx: int = 0) -> None:
         self.layer_idx = layer_idx
-        self.states: list[Optional[dict]] = [None] * (layer_idx + 1)
+        self.states: list[dict | None] = [None] * (layer_idx + 1)
 
     def __len__(self) -> int:
         return len(self.states)
 
-    def __getitem__(self, i: int) -> Optional[dict]:
+    def __getitem__(self, i: int) -> dict | None:
         return self.states[i]
 
-    def update(self, layer_idx: int, **kwargs: Any) -> "_GDNCache":
+    def update(self, layer_idx: int, **kwargs: Any) -> _GDNCache:
         self.states[layer_idx] = kwargs
         return self
 
 
-def _llu_step(llu: nn.Module, x: torch.Tensor, cache: Any, cond: Optional[torch.Tensor] = None):
+def _llu_step(llu: nn.Module, x: torch.Tensor, cache: Any, cond: torch.Tensor | None = None):
     """Run one LLU sublayer on a single token ``x`` (``(B, D)``), threading state.
 
     * GDN-2 units receive the token as a length-1 sequence and thread their
@@ -283,10 +283,15 @@ class LiquidTransformerBlock(nn.Module):
         use_swiglu: bool = True,
         swiglu_mult: int = 4,
         use_attention: bool = True,
-        proj_kwargs: Optional[dict] = None,
-        ffn_kwargs: Optional[dict] = None,
-        cond_llu: Optional[type] = None,
-        cond_kwargs: Optional[dict] = None,
+        proj_kwargs: dict | None = None,
+        ffn_kwargs: dict | None = None,
+        cond_llu: type | None = None,
+        cond_kwargs: dict | None = None,
+        use_engram: bool = False,
+        engram_mode: str = "cond",
+        layer_idx: int = 0,
+        engram_storage: Literal["auto", "cpu", "disk", "cuda"] = "auto",
+        tokenizer_name_or_path: str | None = None,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
@@ -297,6 +302,8 @@ class LiquidTransformerBlock(nn.Module):
 
         proj_kwargs = dict(proj_kwargs or {})
         ffn_kwargs = dict(ffn_kwargs or {})
+        if "cond_dim" in inspect.signature(ffn_cls.__init__).parameters:
+            ffn_kwargs["cond_dim"] = d_model
 
         self._attn_names: list[str] = []
         if use_attention:
@@ -322,6 +329,22 @@ class LiquidTransformerBlock(nn.Module):
         self.cond_provider = None
         if cond_llu is not None:
             self.cond_provider = cond_llu(d_model, d_model, **(cond_kwargs or {}))
+
+        self.engram: Engram | None = None
+        self.engram_mode = engram_mode
+        if use_engram:
+            engram_cfg = EngramConfig(
+                layer_ids=[layer_idx],
+                storage_backend=engram_storage,
+                engram_mode=engram_mode,
+                tokenizer_name_or_path=tokenizer_name_or_path,
+            )
+            self.engram = Engram(
+                layer_id=layer_idx,
+                cfg=engram_cfg,
+                hidden_size=d_model,
+                storage_backend=engram_storage,
+            )
 
         # Per-sublayer recurrent caches (GDN-2 only); rolling KV cache for SWA.
         self.caches: dict[str, Any] = {}
@@ -360,8 +383,9 @@ class LiquidTransformerBlock(nn.Module):
         out, self.caches["o_proj"] = _llu_step(self.o_proj, ctx, self.caches["o_proj"])
         return out
 
-    def _ffn(self, h: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _ffn(self, h: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         h_norm = self.norm2(h)
+        cond = cond if cond is not None else h_norm
         if self.use_swiglu:
             g, self.caches["ffn_gate"] = _llu_step(
                 self.ffn_gate, h_norm, self.caches["ffn_gate"], cond=cond
@@ -377,18 +401,33 @@ class LiquidTransformerBlock(nn.Module):
         out, self.caches["ffn"] = _llu_step(self.ffn, h_norm, self.caches["ffn"], cond=cond)
         return out
 
-    def step(self, h: torch.Tensor) -> torch.Tensor:
+    def step(
+        self,
+        h: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        engram_out: torch.Tensor | None = None,
+        engram_cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if engram_out is None and engram_cond is None and self.engram is not None and input_ids is not None:
+            engram_out, engram_cond = self.engram(h, input_ids)
+
+        if engram_out is not None and self.engram_mode in ("additive", "both"):
+            h = h + engram_out
+
         if self.cond_provider is not None:
             # (SWA, GDN-2) -> (x, cond) -> FFN(StableLiquidLN) -> +residual
             x = self._attention(h) if self.use_attention else h
             cond, self.caches["cond_provider"] = _llu_step(
                 self.cond_provider, h, self.caches["cond_provider"]
             )
+            if engram_cond is not None and self.engram_mode in ("cond", "both"):
+                cond = engram_cond
             h = h + self._ffn(x, cond=cond)
         else:
             if self.use_attention:
                 h = h + self._attention(h)
-            h = h + self._ffn(h)
+            cond = engram_cond if (engram_cond is not None and self.engram_mode in ("cond", "both")) else None
+            h = h + self._ffn(h, cond=cond)
         return h
 
 
@@ -424,6 +463,11 @@ class LiquidTransformer(nn.Module):
         parameterization: str = "lora",
         lln_attn_dim: int = 32,
         lln_attn_heads: int = 2,
+        use_engram: bool = False,
+        engram_mode: str = "cond",
+        engram_layer_ids: list[int] | None = None,
+        engram_storage: Literal["auto", "cpu", "disk", "cuda"] = "auto",
+        tokenizer_name_or_path: str | None = None,
     ) -> None:
         super().__init__()
         if d_model % n_heads != 0:
@@ -487,6 +531,9 @@ class LiquidTransformer(nn.Module):
         else:
             cond_kwargs = None
 
+        self.use_engram = use_engram
+        self.engram_mode = engram_mode
+
         self.blocks = nn.ModuleList(
             [
                 LiquidTransformerBlock(
@@ -502,8 +549,13 @@ class LiquidTransformer(nn.Module):
                     use_attention=use_attention,
                     cond_llu=cond_llu,
                     cond_kwargs=cond_kwargs,
+                    use_engram=use_engram and (engram_layer_ids is None or i in engram_layer_ids),
+                    engram_mode=engram_mode,
+                    layer_idx=i,
+                    engram_storage=engram_storage,
+                    tokenizer_name_or_path=tokenizer_name_or_path,
                 )
-                for _ in range(num_layers)
+                for i in range(num_layers)
             ]
         )
         # Neutral per-position readout (no cross-step recurrence) for fair comparison.
@@ -517,15 +569,30 @@ class LiquidTransformer(nn.Module):
         for block in self.blocks:
             block.reset()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
         # x: (B, T, D)
         self.reset_state()
         B, T, D = x.shape
+        if self.use_engram and input_ids is None:
+            # Fallback mock input_ids if not provided explicitly
+            input_ids = torch.arange(T, device=x.device).unsqueeze(0).expand(B, -1)
+
+        engram_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        if self.use_engram and input_ids is not None:
+            for idx, block in enumerate(self.blocks):
+                if block.engram is not None:
+                    engram_cache[idx] = block.engram(x, input_ids)
+
         stream = []
         for t in range(T):
             h = x[:, t]
-            for block in self.blocks:
-                h = block.step(h)
+            ids_t = input_ids[:, : t + 1] if input_ids is not None else None
+            for idx, block in enumerate(self.blocks):
+                if idx in engram_cache:
+                    e_out, e_cond = engram_cache[idx]
+                    h = block.step(h, engram_out=e_out[:, t], engram_cond=e_cond[:, t])
+                else:
+                    h = block.step(h, input_ids=ids_t)
             stream.append(h)
         stream = torch.stack(stream, dim=1)  # (B, T, D)
         return self.readout(stream)  # (B, T, out_dim)
@@ -561,6 +628,11 @@ def build_model(arch: str, d_model: int, out_dim: int, **overrides: Any) -> Liqu
         parameterization="lora",
         lln_attn_dim=32,
         lln_attn_heads=2,
+        use_engram=overrides.pop("use_engram", False),
+        engram_mode=overrides.pop("engram_mode", "cond"),
+        engram_layer_ids=overrides.pop("engram_layer_ids", None),
+        engram_storage=overrides.pop("engram_storage", "auto"),
+        tokenizer_name_or_path=overrides.pop("tokenizer_name_or_path", None),
     )
     cfg.update(overrides)
     cfg["n_heads"] = _valid_n_heads(d_model, cfg.get("n_heads", 4))
@@ -569,10 +641,10 @@ def build_model(arch: str, d_model: int, out_dim: int, **overrides: Any) -> Liqu
 
 __all__ = [
     "ARCH_FACTORIES",
-    "LiquidTransformerBlock",
-    "LiquidTransformer",
-    "build_model",
-    "RMSNorm",
     "RECURRENT_ARCHS",
+    "LiquidTransformer",
+    "LiquidTransformerBlock",
+    "RMSNorm",
+    "build_model",
     "is_valid_arch",
 ]

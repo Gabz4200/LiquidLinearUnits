@@ -1,11 +1,12 @@
 import torch
+
 from llu.models import (
+    BatchMomentumLiquidLN,
     LiquidLinear,
     Rank1LiquidLN,
     RankRLiquidLN,
-    StableLiquidLN,
     SharedMomentumLiquidLN,
-    BatchMomentumLiquidLN,
+    StableLiquidLN,
 )
 
 

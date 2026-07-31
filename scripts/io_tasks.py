@@ -167,10 +167,10 @@ def make_task(name: str, cfg: dict) -> IOTask:
 
 
 __all__ = [
+    "TASK_FACTORIES",
+    "FourierTarget",
     "IOTask",
     "ModularArithmetic",
-    "FourierTarget",
     "SparseParity",
-    "TASK_FACTORIES",
     "make_task",
 ]

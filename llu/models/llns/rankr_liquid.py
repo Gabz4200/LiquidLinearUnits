@@ -1,9 +1,9 @@
 r"""RankRLiquidLN: rank-R adaptive factors."""
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseLLU
 from .utils import (
@@ -31,10 +31,10 @@ class RankRLiquidLN(BaseLLU):
         scale_init: float = 0.5,
         normalize_input: bool = False,
         nonlinear_hypernet: bool = False,
-        hyper_hidden_dim: Optional[int] = None,
+        hyper_hidden_dim: int | None = None,
         init_method: str = "hyperfan_in",
         parameterization: str = "lora",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, rank=1, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.5, normalize_input=False, nonlinear_hypernet=False, hyper_hidden_dim=None, init_method="hyperfan_in", parameterization="lora", device=None, dtype=torch.float32) -> None
@@ -109,7 +109,7 @@ class RankRLiquidLN(BaseLLU):
         if self.parameterization == "svd":
             self._create_svd_factors(dev, dtype)
 
-        self.bias_dynamic: Optional[nn.Linear] = (
+        self.bias_dynamic: nn.Linear | None = (
             nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
             if dynamic_bias
             else None

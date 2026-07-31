@@ -17,15 +17,15 @@ Key properties tested:
 
 from __future__ import annotations
 
-import torch
 from typing import Any
 
+import torch
+
 from llu.models.gdn2.gdn2 import (
+    GatedDeltaNet2,
     chunk_gdn2,
     fused_recurrent_gdn2,
-    GatedDeltaNet2,
 )
-
 
 # =============================================================================
 # HELPERS

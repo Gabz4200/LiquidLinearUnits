@@ -1,17 +1,18 @@
 r"""Base classes for Liquid Linear Units."""
 
+
 import torch
-import torch.nn as nn
-from typing import Optional, Tuple
+from torch import nn
+
 from .utils import (
     DEVICE,
     _activate,
-    _small_init,
-    _zero_out_last,
-    _zero_b_section,
-    _init_hypernetwork,
     _ensure_buffer_shape,
     _FreezeMixin,
+    _init_hypernetwork,
+    _small_init,
+    _zero_b_section,
+    _zero_out_last,
 )
 
 
@@ -31,7 +32,7 @@ class BaseLLU(_FreezeMixin, nn.Module):
         scale_init: float = 0.9,
         factor_activation: str = "norm",
         init_method: str = "hyperfan_in",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
@@ -47,14 +48,14 @@ class BaseLLU(_FreezeMixin, nn.Module):
         nn.init.xavier_uniform_(self.linear_core.weight)
         if self.linear_core.bias is not None:
             nn.init.zeros_(self.linear_core.bias)
-        self.bias_dynamic: Optional[nn.Module] = None
-        self.U: Optional[nn.Parameter] = None
-        self.V: Optional[nn.Parameter] = None
+        self.bias_dynamic: nn.Module | None = None
+        self.U: nn.Parameter | None = None
+        self.V: nn.Parameter | None = None
         # Declared here (not just on subclasses) so the SVD- and
         # parameterization-aware helpers can reference them without risking an
         # AttributeError before a subclass assigns the concrete value.
-        self.rank: Optional[int] = None
-        self.parameterization: Optional[str] = None
+        self.rank: int | None = None
+        self.parameterization: str | None = None
 
     def _init_bias_dynamic(self) -> None:
         if self.bias_dynamic is not None:
@@ -65,7 +66,7 @@ class BaseLLU(_FreezeMixin, nn.Module):
         self,
         target: nn.Module,
         b_start: int,
-        rank: Optional[int] = None,
+        rank: int | None = None,
     ) -> None:
         r"""_init_low_rank_adaptive(target, b_start, rank=None) -> None
 
@@ -107,7 +108,7 @@ class BaseLLU(_FreezeMixin, nn.Module):
 
     def _create_svd_factors(
         self,
-        device: Optional[torch.device],
+        device: torch.device | None,
         dtype: torch.dtype,
     ) -> None:
         r"""_create_svd_factors(device, dtype) -> None
@@ -160,7 +161,7 @@ class BaseMomentumLLU(BaseLLU):
         factor_activation: str = "norm",
         init_method: str = "hyperfan_in",
         learnable_decay_rate: bool = False,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         if rank < 1:
@@ -193,7 +194,7 @@ class BaseMomentumLLU(BaseLLU):
         a_new: torch.Tensor,
         b_new: torch.Tensor,
         detach: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if detach:
             self.a_raw = self.a_raw.detach()
             self.b_raw = self.b_raw.detach()
@@ -235,7 +236,7 @@ class BaseMomentumLLU(BaseLLU):
         self,
         a_new: torch.Tensor,
         b_new: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         self.a_raw = _ensure_buffer_shape(self.a_raw, a_new).detach()
         self.b_raw = _ensure_buffer_shape(self.b_raw, b_new).detach()
 
@@ -257,7 +258,7 @@ class BaseMomentumLLU(BaseLLU):
 
     def _register_momentum_buffers(
         self,
-        device: Optional[torch.device],
+        device: torch.device | None,
         dtype: torch.dtype,
         batch: bool = False,
     ) -> None:

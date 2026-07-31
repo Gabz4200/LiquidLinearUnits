@@ -1,11 +1,11 @@
 r"""Utility functions and mixins for Liquid Linear Units."""
 
 import math
-from typing import Optional, Any, cast
+from typing import Any, cast
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -68,7 +68,7 @@ def _small_init(module: nn.Module, gain: float = 0.02) -> None:
                 nn.init.zeros_(m.bias)
 
 
-def _last_linear(module: nn.Module) -> Optional[nn.Linear]:
+def _last_linear(module: nn.Module) -> nn.Linear | None:
     r"""_last_linear(module) -> nn.Linear or None
 
     Return the last :class:`~nn.Linear` in a module or :class:`~nn.Sequential`.
@@ -140,7 +140,7 @@ def _hyperfan_init(
     nonlinearity: str = "linear",
     var_e: float = 1.0,
     uniform: bool = True,
-    rank: Optional[int] = None,
+    rank: int | None = None,
 ) -> None:
     r"""_hyperfan_init(module, in_features, out_features, mode="fan_in", nonlinearity="linear", var_e=1.0, uniform=True, rank=None) -> None
 
@@ -216,7 +216,7 @@ def _init_hypernetwork(
     init_method: str,
     in_features: int,
     out_features: int,
-    rank: Optional[int] = None,
+    rank: int | None = None,
 ) -> None:
     r"""_init_hypernetwork(hypernetwork, init_method, in_features, out_features, rank=None) -> None
 
@@ -279,8 +279,8 @@ def _run_gdn2_to_factors(
     in_features: int,
     out_features: int,
     parameterization: str,
-    attention_mask: Optional[torch.Tensor],
-    past_key_values: Optional[Any],
+    attention_mask: torch.Tensor | None,
+    past_key_values: Any | None,
     use_cache: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
     r"""_run_gdn2_to_factors(gdn2, h_in, proj_out, *, rank, in_features, out_features, parameterization, attention_mask, past_key_values, use_cache) -> (orig_shape, gdn_out, raw, past_key_values)
@@ -366,7 +366,7 @@ def _factorized_hyperfan_init(
 
 
 def _compute_lora_scale(
-    raw_scale: Optional[torch.Tensor],
+    raw_scale: torch.Tensor | None,
     scale_init: float,
     lora_alpha: float,
     rank: int,

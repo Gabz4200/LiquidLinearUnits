@@ -1,10 +1,10 @@
-import torch
 import pytest
+import torch
 
 from llu.models.llns import (
-    SharedMomentumLiquidLN,
     BatchMomentumLiquidLN,
     MomentumGDNLiquidLN,
+    SharedMomentumLiquidLN,
 )
 
 MOMENTUM_CLASSES = [

@@ -1,17 +1,19 @@
 r"""GDNLiquidLN: Liquid Linear Unit with a Gated DeltaNet 2 (GDN-2) block."""
 
+from typing import Any, Literal
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Any, Literal
+from torch import nn
 
 from llu.models.gdn2 import GatedDeltaNet2
+
 from .base import BaseLLU
 from .utils import (
     DEVICE,
     _activate,
-    _validate_parameterization,
     _run_gdn2_to_factors,
+    _validate_parameterization,
 )
 
 
@@ -34,13 +36,13 @@ class GDNLiquidLN(BaseLLU):
         expand_v: float = 1.0,
         head_dim: int = 16,
         num_heads: int = 4,
-        num_v_heads: Optional[int] = None,
+        num_v_heads: int | None = None,
         mode: Literal["chunk", "fused_recurrent"] = "chunk",
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
-        layer_idx: Optional[int] = None,
+        layer_idx: int | None = None,
         norm_eps: float = 1e-5,
         # standard LLU parameters
         bias: bool = True,
@@ -50,7 +52,7 @@ class GDNLiquidLN(BaseLLU):
         normalize_input: bool = True,
         init_method: str = "hyperfan_in",
         parameterization: str = "lora",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, rank=4, expand_v=1.0, head_dim=16, num_heads=4, num_v_heads=None, mode="chunk", use_short_conv=True, allow_neg_eigval=False, conv_size=4, conv_bias=False, layer_idx=None, norm_eps=1e-5, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", parameterization="lora", device=None, dtype=torch.float32) -> None
@@ -159,9 +161,9 @@ class GDNLiquidLN(BaseLLU):
     def forward(
         self,
         x: torch.Tensor,
-        cond: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Any] = None,
+        cond: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Any | None = None,
         use_cache: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
         r"""forward(x, cond=None, attention_mask=None, past_key_values=None, use_cache=False) -> Tensor or (Tensor, Cache)

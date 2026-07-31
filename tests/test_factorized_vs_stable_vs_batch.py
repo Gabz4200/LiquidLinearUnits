@@ -4,9 +4,10 @@ Runs equivalent happy-path tests from test_batch_momentum_liquid.py adapted
 for each variant, plus cross-variant numerical comparison on identical inputs.
 """
 
-import torch
 import pytest
-from llu.models import BatchMomentumLiquidLN, StableLiquidLN, FactorizedLiquidLN
+import torch
+
+from llu.models import BatchMomentumLiquidLN, FactorizedLiquidLN, StableLiquidLN
 
 IN_FEATURES = 8
 OUT_FEATURES = 4

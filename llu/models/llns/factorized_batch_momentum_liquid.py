@@ -7,15 +7,14 @@ momentum smoothing is applied per batch element before computing the
 low-rank adaptive update.
 """
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseMomentumLLU
 from .utils import (
     DEVICE,
-    _activate,
     _factorized_hyperfan_init,
     _small_init,
     _validate_parameterization,
@@ -42,10 +41,10 @@ class FactorizedBatchMomentumLiquidLN(BaseMomentumLLU):
         self,
         in_features: int,
         out_features: int,
-        cond_dim: Optional[int] = None,
+        cond_dim: int | None = None,
         decay_rate: float = 0.4,
         rank: int = 4,
-        hyper_hidden_dim: Optional[int] = None,
+        hyper_hidden_dim: int | None = None,
         bias: bool = True,
         dynamic_bias: bool = False,
         factor_activation: str = "norm",
@@ -54,7 +53,7 @@ class FactorizedBatchMomentumLiquidLN(BaseMomentumLLU):
         init_method: str = "hyperfan_in",
         learnable_decay_rate: bool = False,
         parameterization: str = "lora",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         _validate_parameterization(parameterization)
@@ -101,7 +100,7 @@ class FactorizedBatchMomentumLiquidLN(BaseMomentumLLU):
             )
             self.proj_b = None
 
-        self.bias_dynamic: Optional[nn.Sequential] = (
+        self.bias_dynamic: nn.Sequential | None = (
             nn.Sequential(
                 nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
@@ -133,7 +132,7 @@ class FactorizedBatchMomentumLiquidLN(BaseMomentumLLU):
             _small_init(self.bias_dynamic)
             _zero_out_last(self.bias_dynamic)
 
-    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         cond = cond if cond is not None else x
         h_in = F.rms_norm(cond, (self.cond_dim,)) if self.normalize_input else cond
 

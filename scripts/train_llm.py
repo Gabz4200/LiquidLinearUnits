@@ -51,17 +51,15 @@ import math
 import os
 import sys
 import time
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-
 from transformers import AutoTokenizer
 
-from llu.models.liquid_llm import build_llm, num_params, LLN_REGISTRY
+from llu.models.liquid_llm import LLN_REGISTRY, build_llm, num_params
 
 
 def _require_internet() -> None:
@@ -84,6 +82,7 @@ def _require_internet() -> None:
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
+
 
 class PackedTokens(Dataset):
     def __init__(self, ids: list[int], seq_len: int) -> None:
@@ -118,6 +117,7 @@ def build_token_buffer(tok, tokens: int, dataset: str, seq_len: int) -> list[int
 # Evaluation
 # ---------------------------------------------------------------------------
 
+
 def reset_momentum_buffers(model: torch.nn.Module) -> None:
     """Zero the persistent momentum buffers of stateful LLUs before eval.
 
@@ -133,7 +133,9 @@ def reset_momentum_buffers(model: torch.nn.Module) -> None:
                 buf.zero_()
 
 
-def _wiki_ppl(model: torch.nn.Module, tok, device: str, seq_len: int, max_tokens: int = 8000) -> float:
+def _wiki_ppl(
+    model: torch.nn.Module, tok, device: str, seq_len: int, max_tokens: int = 8000
+) -> float:
     from datasets import load_dataset
 
     ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
@@ -176,14 +178,16 @@ def _lambada_eval(model: torch.nn.Module, tok, device: str, seq_len: int, max_ex
             ids = tok(ex["text"], add_special_tokens=False).input_ids
             if len(ids) < 2:
                 continue
-            ctx = ids[:-1][-(seq_len - 1):]   # cap context to the training window
+            ctx = ids[:-1][-(seq_len - 1) :]  # cap context to the training window
             last = ids[-1]
             x = torch.tensor(ctx, device=device).unsqueeze(0)
             logits = model(x)[0, -1]
             pred = int(logits.argmax().item())
             correct += int(pred == last)
             total += 1
-            loss_sum += F.cross_entropy(logits.unsqueeze(0), torch.tensor([last], device=device)).item()
+            loss_sum += F.cross_entropy(
+                logits.unsqueeze(0), torch.tensor([last], device=device)
+            ).item()
             n_tok += 1
             if total >= max_ex:
                 break
@@ -195,6 +199,7 @@ def _lambada_eval(model: torch.nn.Module, tok, device: str, seq_len: int, max_ex
 # ---------------------------------------------------------------------------
 # Train / eval
 # ---------------------------------------------------------------------------
+
 
 def _run_eval(args, model, tok, device, metrics: dict) -> None:
     """Run Wiki + LAMBADA eval in place. Failures propagate (no silent fallback)."""
@@ -212,10 +217,18 @@ def _run_eval(args, model, tok, device, metrics: dict) -> None:
 
 def _write_result(args, variant, preset, n_params, step, train_time, metrics, ckpt_path) -> dict:
     result = dict(
-        variant=variant, preset=preset, lln=args.lln, params=n_params,
-        tokens=args.tokens, steps=step, train_time_s=round(train_time, 1),
-        seq_len=args.seq_len, lr=args.lr, parameterization=args.parameterization,
-        ckpt=ckpt_path, metrics=metrics,
+        variant=variant,
+        preset=preset,
+        lln=args.lln,
+        params=n_params,
+        tokens=args.tokens,
+        steps=step,
+        train_time_s=round(train_time, 1),
+        seq_len=args.seq_len,
+        lr=args.lr,
+        parameterization=args.parameterization,
+        ckpt=ckpt_path,
+        metrics=metrics,
     )
     with open(args.out, "w") as f:
         json.dump(result, f, indent=2)
@@ -230,7 +243,7 @@ def _suffixed_path(path: str, suffix: str) -> str:
     return f"{root}_{suffix}{ext}"
 
 
-def _fmt(v: Optional[float]) -> str:
+def _fmt(v: float | None) -> str:
     if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
         return "-"
     return f"{v:.4f}" if isinstance(v, float) else str(v)
@@ -248,11 +261,15 @@ def _write_aggregate(args, results: list[dict]) -> None:
     lines = [
         "# LLM benchmark (CPU snapshot)",
         "",
-        f"Preset `{preset}`, parameterization `{param}`, tokens {tokens:,}, "
-        f"seq_len {args.seq_len}.",
+        (
+            f"Preset `{preset}`, parameterization `{param}`, tokens {tokens:,}, "
+            f"seq_len {args.seq_len}."
+        ),
         "",
-        "Lower ppl is better; higher acc is better. These are short CPU-scale "
-        "runs (**not** convergence numbers).",
+        (
+            "Lower ppl is better; higher acc is better. These are short CPU-scale "
+            "runs (**not** convergence numbers)."
+        ),
         "",
         "| Variant | LLN | Params | Steps | Train loss | Wiki ppl | LMB ppl | LMB acc | Time (s) |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -304,31 +321,47 @@ def train(args) -> dict:
         print(f"[eval_only] loading checkpoint {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=device)
         model = build_llm(
-            ckpt["variant"], ckpt["preset"],
+            ckpt["variant"],
+            ckpt["preset"],
             lln=ckpt.get("lln", "StableLiquidLN"),
             parameterization=ckpt.get("parameterization", args.parameterization),
+            use_engram=args.use_engram,
+            engram_mode=args.engram_mode,
+            engram_storage=args.engram_storage,
             **json.loads(args.overrides or "{}"),
         ).to(device)
         model.load_state_dict(ckpt["state"])
         n_params = num_params(model)
         print(f"[model] loaded {ckpt['variant']} @ preset={ckpt['preset']}: {n_params:,} params")
-        metrics: dict[str, Optional[float]] = {}
+        metrics: dict[str, float | None] = {}
         _run_eval(args, model, tok, device, metrics)
-        return _write_result(args, ckpt["variant"], ckpt["preset"], n_params, 0, 0.0, metrics, ckpt_path)
+        return _write_result(
+            args, ckpt["variant"], ckpt["preset"], n_params, 0, 0.0, metrics, ckpt_path
+        )
 
-    print(f"[data] streaming {args.dataset} up to {args.tokens} tokens (seq_len={args.seq_len}) ...")
+    print(
+        f"[data] streaming {args.dataset} up to {args.tokens} tokens (seq_len={args.seq_len}) ..."
+    )
     ids = build_token_buffer(tok, args.tokens, args.dataset, args.seq_len)
     print(f"[data] collected {len(ids):,} tokens")
     data = PackedTokens(ids, args.seq_len)
     loader = DataLoader(data, batch_size=args.batch, shuffle=True, drop_last=True)
 
     model = build_llm(
-        args.variant, args.preset, lln=args.lln,
-        parameterization=args.parameterization, **json.loads(args.overrides or "{}"),
+        args.variant,
+        args.preset,
+        lln=args.lln,
+        parameterization=args.parameterization,
+        use_engram=args.use_engram,
+        engram_mode=args.engram_mode,
+        engram_storage=args.engram_storage,
+        **json.loads(args.overrides or "{}"),
     ).to(device)
     n_params = num_params(model)
-    print(f"[model] {args.variant} @ preset={args.preset} lln={args.lln}: "
-          f"{n_params:,} params, {len(model.blocks)} layers")
+    print(
+        f"[model] {args.variant} @ preset={args.preset} lln={args.lln}: "
+        f"{n_params:,} params, {len(model.blocks)} layers"
+    )
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
 
@@ -341,7 +374,9 @@ def train(args) -> dict:
         for x in loader:
             x = x.to(device)
             logits = model(x)
-            loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.size(-1)), x[:, 1:].reshape(-1))
+            loss = F.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)), x[:, 1:].reshape(-1)
+            )
 
             # Early stopping for runaway loss (nan/inf or explosion)
             if not torch.isfinite(loss).all():
@@ -363,15 +398,23 @@ def train(args) -> dict:
 
     train_time = time.perf_counter() - t0
 
-    torch.save({
-        "variant": args.variant, "preset": args.preset, "lln": args.lln,
-        "parameterization": args.parameterization, "state": model.state_dict(),
-    }, ckpt_path)
+    torch.save(
+        {
+            "variant": args.variant,
+            "preset": args.preset,
+            "lln": args.lln,
+            "parameterization": args.parameterization,
+            "state": model.state_dict(),
+        },
+        ckpt_path,
+    )
     print(f"[ckpt] saved {ckpt_path}")
 
-    metrics: dict[str, Optional[float]] = {"train_loss_final": float(last_loss)}
+    metrics: dict[str, float | None] = {"train_loss_final": float(last_loss)}
     _run_eval(args, model, tok, device, metrics)
-    return _write_result(args, args.variant, args.preset, n_params, step, train_time, metrics, ckpt_path)
+    return _write_result(
+        args, args.variant, args.preset, n_params, step, train_time, metrics, ckpt_path
+    )
 
 
 def run_benchmark(a) -> list[dict]:
@@ -396,11 +439,11 @@ def run_benchmark(a) -> list[dict]:
     for variant, lln in runs:
         ra = argparse.Namespace(**vars(a))
         ra.variant = variant
-        ra.lln = lln or "-"          # baseline ignores lln; "-" keeps the tag clean
+        ra.lln = lln or "-"  # baseline ignores lln; "-" keeps the tag clean
         tag = lln or "baseline"
         ra.out = _suffixed_path(a.out, f"{variant}_{tag}")
         ra.ckpt = _suffixed_path(a.ckpt or "llm_ckpt.pt", f"{variant}_{tag}")
-        print(f"\n{'='*64}\n=== RUN: variant={variant} lln={ra.lln} ===\n{'='*64}")
+        print(f"\n{'=' * 64}\n=== RUN: variant={variant} lln={ra.lln} ===\n{'=' * 64}")
         if a.parameterization == "mixed":
             for mode in ("lora", "svd"):
                 mr = argparse.Namespace(**vars(ra))
@@ -418,8 +461,12 @@ def run_benchmark(a) -> list[dict]:
 def main() -> None:
     p = argparse.ArgumentParser(description="Liquid / GDN-2 LLM benchmark (CPU-friendly)")
     p.add_argument("--variant", choices=["ours", "baseline"], default="ours")
-    p.add_argument("--preset", default="tiny", choices=["tiny", "small", "medium", "0.5B"],
-                   help="tiny = CPU budget (~2-4M params); small/medium/0.5B = GPU-class")
+    p.add_argument(
+        "--preset",
+        default="tiny",
+        choices=["tiny", "small", "medium", "0.5B"],
+        help="tiny = CPU budget (~2-4M params); small/medium/0.5B = GPU-class",
+    )
     p.add_argument("--dataset", default="bhavnicksm/fineweb-edu-micro")
     p.add_argument("--tokens", type=int, default=100_000)
     p.add_argument("--seq_len", type=int, default=64)
@@ -432,19 +479,52 @@ def main() -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument("--eval", action="store_true", default=True)
     p.add_argument("--no_eval", dest="eval", action="store_false")
-    p.add_argument("--parameterization", default="svd", choices=["lora", "svd", "mixed"],
-                   help="low-rank update mode (mixed = run both lora and svd per config)")
-    p.add_argument("--lln", default="StableLiquidLN", choices=list(LLN_REGISTRY.keys()),
-                   help="single-run intermediary LLN for --variant ours")
-    p.add_argument("--llns", default="StableLiquidLN,CrossAttnLoraLN,SharedMomentumLiquidLN,BatchMomentumLiquidLN",
-                   help="comma-separated LLNs for the comparison loop (baseline always included)")
-    p.add_argument("--single", action="store_true",
-                   help="run only --variant/--lln (skip the comparison loop)")
+    p.add_argument(
+        "--parameterization",
+        default="svd",
+        choices=["lora", "svd", "mixed"],
+        help="low-rank update mode (mixed = run both lora and svd per config)",
+    )
+    p.add_argument(
+        "--lln",
+        default="StableLiquidLN",
+        choices=list(LLN_REGISTRY.keys()),
+        help="single-run intermediary LLN for --variant ours",
+    )
+    p.add_argument(
+        "--llns",
+        default="StableLiquidLN,CrossAttnLoraLN,SharedMomentumLiquidLN,BatchMomentumLiquidLN",
+        help="comma-separated LLNs for the comparison loop (baseline always included)",
+    )
+    p.add_argument(
+        "--single", action="store_true", help="run only --variant/--lln (skip the comparison loop)"
+    )
+    p.add_argument(
+        "--use_engram", action="store_true", help="Enable DeepSeek Engram conditional memory"
+    )
+    p.add_argument(
+        "--engram_mode",
+        default="cond",
+        choices=["cond", "additive", "both"],
+        help="Engram retrieval routing mode",
+    )
+    p.add_argument(
+        "--engram_storage",
+        default="auto",
+        choices=["auto", "cpu", "disk", "cuda"],
+        help="Engram embedding storage backend",
+    )
     p.add_argument("--overrides", default="", help="JSON dict forwarded to LLMConfig")
     p.add_argument("--ckpt", default=None, help="checkpoint path; auto-derived if omitted")
-    p.add_argument("--eval_only", action="store_true", help="load --ckpt and run eval only (skip training)")
-    p.add_argument("--wiki_tokens", type=int, default=8000, help="max wiki tokens for ppl eval (RAM guard)")
-    p.add_argument("--lambada_ex", type=int, default=50, help="max LAMBADA examples for eval (RAM guard)")
+    p.add_argument(
+        "--eval_only", action="store_true", help="load --ckpt and run eval only (skip training)"
+    )
+    p.add_argument(
+        "--wiki_tokens", type=int, default=8000, help="max wiki tokens for ppl eval (RAM guard)"
+    )
+    p.add_argument(
+        "--lambada_ex", type=int, default=50, help="max LAMBADA examples for eval (RAM guard)"
+    )
     p.add_argument("--out", default="llm_bench_report.json")
     a = p.parse_args()
     run_benchmark(a)

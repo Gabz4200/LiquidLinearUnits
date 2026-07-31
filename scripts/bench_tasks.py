@@ -21,11 +21,9 @@ runtime can be controlled directly. Sweepable tasks expose :meth:`sweep`.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import numpy as np
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Shared loss / metric helpers
@@ -514,7 +512,7 @@ TASK_DEFAULTS: dict[str, dict] = {
 }
 
 
-def make_task(name: str, overrides: Optional[dict] = None) -> SyntheticTask:
+def make_task(name: str, overrides: dict | None = None) -> SyntheticTask:
     base = dict(TASK_DEFAULTS.get(name, {}))
     base.update(overrides or {})
     cls = TASKS[name]
@@ -527,4 +525,4 @@ def make_task(name: str, overrides: Optional[dict] = None) -> SyntheticTask:
     return cls(**base)
 
 
-__all__ = ["TASKS", "TASK_DEFAULTS", "make_task", "loss_fn", "compute_metric", "SyntheticTask"]
+__all__ = ["TASKS", "TASK_DEFAULTS", "SyntheticTask", "compute_metric", "loss_fn", "make_task"]

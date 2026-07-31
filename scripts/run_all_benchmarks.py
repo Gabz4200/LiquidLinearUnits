@@ -10,7 +10,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -160,9 +159,9 @@ def generate_table(synth_results: list[dict], io_results: list[dict], out_path: 
     """Generate a unified Markdown comparison table."""
     lines = []
     lines.append("# LLU Architecture Benchmark Comparison")
-    lines.append(f"")
+    lines.append("")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"Device: CPU | Config: quick (tiny model, 30 steps)")
+    lines.append("Device: CPU | Config: quick (tiny model, 30 steps)")
     lines.append("")
     lines.append("Legend: **bold** = best in column, tr = train loss, ev = eval loss")
     lines.append("")

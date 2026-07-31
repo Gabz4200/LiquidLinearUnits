@@ -1,9 +1,9 @@
 r"""BatchMomentumLiquidLN: rank-R adaptive factors with per-batch-element momentum."""
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseMomentumLLU
 from .utils import (
@@ -23,10 +23,10 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         self,
         in_features: int,
         out_features: int,
-        cond_dim: Optional[int] = None,
+        cond_dim: int | None = None,
         decay_rate: float = 0.4,
         rank: int = 4,
-        hyper_hidden_dim: Optional[int] = None,
+        hyper_hidden_dim: int | None = None,
         bias: bool = True,
         dynamic_bias: bool = False,
         factor_activation: str = "norm",
@@ -35,7 +35,7 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         init_method: str = "hyperfan_in",
         learnable_decay_rate: bool = False,
         parameterization: str = "lora",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, cond_dim=None, decay_rate=0.4, rank=4, hyper_hidden_dim=None, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, init_method="hyperfan_in", learnable_decay_rate=False, parameterization="lora", device=None, dtype=torch.float32) -> None
@@ -78,7 +78,7 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         )
 
         # Dynamic bias with MLP
-        self.bias_dynamic: Optional[nn.Sequential] = (
+        self.bias_dynamic: nn.Sequential | None = (
             nn.Sequential(
                 nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
                 nn.SiLU(),
@@ -98,7 +98,7 @@ class BatchMomentumLiquidLN(BaseMomentumLLU):
         else:
             self._init_svd_projection(self.hypernetwork)
 
-    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         r"""forward(x, cond=None) -> Tensor
         """
         cond = cond if cond is not None else x

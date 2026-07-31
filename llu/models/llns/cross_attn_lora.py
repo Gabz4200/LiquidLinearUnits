@@ -24,10 +24,10 @@ optional ``cond``, ``normalize_input`` and ``factor_activation``, and both
 ``lora`` and ``svd`` parameterizations.
 """
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from torch import nn
 
 from .base import BaseLLU
 from .utils import (
@@ -35,8 +35,8 @@ from .utils import (
     _activate,
     _ensure_3d,
     _small_init,
-    _zero_out_last,
     _validate_parameterization,
+    _zero_out_last,
 )
 
 
@@ -68,14 +68,14 @@ class CrossAttnLoraLN(BaseLLU):
         factor_activation: str = "norm",
         scale_init: float = 0.01,
         normalize_input: bool = True,
-        cond_dim: Optional[int] = None,
+        cond_dim: int | None = None,
         init_method: str = "xavier",
         parameterization: str = "lora",
         lora_alpha: float = 1.0,
         attn_dim: int = 32,
         attn_heads: int = 2,
         attn_activation: str = "silu",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         r"""__init__(in_features, out_features, rank=4, bias=True, dynamic_bias=False, factor_activation="norm", scale_init=0.01, normalize_input=True, cond_dim=None, init_method="xavier", parameterization="lora", attn_dim=32, attn_heads=2, attn_activation="gelu", device=None, dtype=torch.float32) -> None
@@ -189,7 +189,7 @@ class CrossAttnLoraLN(BaseLLU):
 
         # --- Optional dynamic bias (driven by cond). ---
         hidden = max(self.cond_dim // 4, rank * 16)
-        self.bias_dynamic: Optional[nn.Sequential] = (
+        self.bias_dynamic: nn.Sequential | None = (
             nn.Sequential(
                 nn.Linear(self.cond_dim, hidden, device=dev, dtype=dtype),
                 nn.SiLU(),
@@ -239,7 +239,7 @@ class CrossAttnLoraLN(BaseLLU):
     def forward(
         self,
         x: torch.Tensor,
-        cond: Optional[torch.Tensor] = None,
+        cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""forward(x, cond=None) -> Tensor
 

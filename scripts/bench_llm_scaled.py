@@ -14,7 +14,6 @@ import math
 import os
 import sys
 import time
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,7 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-from llu.models.liquid_llm import build_llm, num_params, LLN_REGISTRY
+from llu.models.liquid_llm import build_llm, num_params
 
 
 def _require_internet() -> None:
@@ -231,9 +230,9 @@ def train_one(args, variant, lln_name, parameterization, device, tok, loader):
     }
     if args.eval:
         reset_momentum_buffers(model)
-        print(f"  [eval] Wiki ppl ...")
+        print("  [eval] Wiki ppl ...")
         metrics["wiki_ppl"] = wiki_ppl(model, tok, device, args.seq_len, args.wiki_tokens)
-        print(f"  [eval] LAMBADA ...")
+        print("  [eval] LAMBADA ...")
         lmb_ppl, lmb_acc = lambada_eval(model, tok, device, args.seq_len, args.lambada_ex)
         metrics["lmb_ppl"] = lmb_ppl
         metrics["lmb_acc"] = lmb_acc
