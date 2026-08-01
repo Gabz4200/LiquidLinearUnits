@@ -363,6 +363,12 @@ def main():
     )
     p.add_argument("--skip_baseline", action="store_true")
     p.add_argument(
+        "--num_experts",
+        type=int,
+        default=8,
+        help="Number of experts for EngramRetrievedLoraLN (ignored by other archs)",
+    )
+    p.add_argument(
         "--use_engram", action="store_true", help="Enable DeepSeek Engram conditional memory"
     )
     p.add_argument(

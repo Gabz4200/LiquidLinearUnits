@@ -21,11 +21,9 @@ import torch
 from torch import nn
 
 from .llns import (
-    BatchMomentumLiquidLN,
-    FactorizedBatchMomentumLiquidLN,
+    EngramRetrievedLoraLN,
     FactorizedLiquidLN,
     RankRLiquidLN,
-    SharedMomentumLiquidLN,
     StableLiquidLN,
 )
 
@@ -35,11 +33,9 @@ from .llns import (
 # apply to a stateless vector map.
 IO_LLN_REGISTRY = {
     "StableLiquidLN": StableLiquidLN,
+    "EngramRetrievedLoraLN": EngramRetrievedLoraLN,
     "FactorizedLiquidLN": FactorizedLiquidLN,
     "RankRLiquidLN": RankRLiquidLN,
-    "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
-    "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
-    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
 }
 
 
@@ -51,12 +47,15 @@ def _lln_kwargs(
     rank: int,
     parameterization: str,
     normalize_input: bool = True,
+    num_experts: int = 8,
 ) -> dict:
     """Build kwargs for an LLU layer, forwarding only params the class accepts."""
     params = set(inspect.signature(cls.__init__).parameters)
     kw: dict = {"in_features": in_f, "out_features": out_f}
     if "rank" in params:
         kw["rank"] = rank
+    if "num_experts" in params:
+        kw["num_experts"] = num_experts
     if "parameterization" in params:
         kw["parameterization"] = parameterization
     if "normalize_input" in params:

@@ -13,28 +13,49 @@ token mixing + a SwiGLU MLP) where **every** `nn.Linear` is replaced by a Liquid
 Linear Unit (LLU). The families differ only in _which_ LLU fills the projection
 (`q/k/v/o`) and FFN roles:
 
-| Family                            | Projection (q/k/v/o)   | FFN                                          |
-| --------------------------------- | ---------------------- | -------------------------------------------- |
-| `LiquidLinear`                    | LiquidLinear           | LiquidLinear                                 |
-| `Rank1LiquidLN`                   | Rank1LiquidLN          | Rank1LiquidLN                                |
-| `RankRLiquidLN`                   | RankRLiquidLN          | RankRLiquidLN                                |
-| `StableLiquidLN`                  | StableLiquidLN         | StableLiquidLN                               |
-| `FactorizedLiquidLN`              | FactorizedLiquidLN     | FactorizedLiquidLN                           |
-| `GDNLiquidLN`                     | StableLiquidLN         | **GDN-2** (`GDNLiquidLN`)                    |
-| `MomentumGDNLiquidLN`             | SharedMomentumLiquidLN | **GDN-2**                                    |
-| `Shared/BatchMomentumLiquidLN`    | Shared/BatchMomentum   | Shared/BatchMomentum                         |
-| `FactorizedBatchMomentumLiquidLN` | FactorizedBatchMom.    | FactorizedBatchMom.                          |
-| **`StableGDNCondLiquidLN`**       | StableLiquidLN         | **StableLiquidLN, conditioned by GDN-2**     |
-| **`FactorizedGDNCondLiquidLN`**   | FactorizedLiquidLN     | **FactorizedLiquidLN, conditioned by GDN-2** |
-| **`FactBatchMomGDNCondLiquidLN`** | FactBatchMom           | **FactBatchMom, conditioned by GDN-2**       |
+| Family                      | Projection (q/k/v/o)   | FFN                                          |
+| --------------------------- | ---------------------- | -------------------------------------------- |
+| `StableLiquidLN`            | StableLiquidLN         | StableLiquidLN                               |
+| `FactorizedLiquidLN`        | FactorizedLiquidLN     | FactorizedLiquidLN                           |
+| `RankRLiquidLN`             | RankRLiquidLN          | RankRLiquidLN                                |
+| `GDNLiquidLN`               | StableLiquidLN         | **GDN-2** (`GDNLiquidLN`)                    |
+| `CrossAttnLoraLN`           | CrossAttnLoraLN        | CrossAttnLoraLN                              |
+| **`EngramRetrievedLoraLN`** | EngramRetrievedLoraLN  | **EngramRetrievedLoraLN (LoRA expert bank + Engram gate)** |
 
-`StableGDNCondLiquidLN` is the newest variant. It does **not** use GDN-2 as an
-FFN transform. Instead, a small GDN-2 recurrence produces a `d_model`-sized
-**conditioning** vector that is fed (as `cond`) into the hypernetwork of each of
-the three Stable-Liquid SwiGLU sublayers. SWA still supplies the token-mixed
-`x`; GDN-2 supplies `cond`: `(SWA, GDN-2) → (x, cond) → StableLiquidLN FFN`.
-With `--no_attention` (or the `_noattn` ablation), SWA is removed entirely and
-the block becomes pure LLU recurrence, with GDN-2 still providing `cond`.
+`EngramRetrievedLoraLN` is the newest variant, and it works differently from
+everything above. Instead of conditioning the FFN with a GDN-2 recurrence (that
+path is gone, see below), it **retrieves then modulates**. DeepSeek Engram
+n-gram hashing (`llu/models/engram/`) picks a LoRA expert $(A_k, B_k)$ from a
+learned bank, and a sequence-conditioned diagonal gate
+$g(x) = \mathrm{SiLU}(W_g x)$ scales it:
+
+$$\Delta W = B_k \cdot \operatorname{diag}(g(x)) \cdot A_k$$
+
+The gate starts at zero, so at step 1 the adaptive path is identity (the
+HypeLoRA calibration insight). Like `CrossAttnLoraLN`, it accepts both
+`"lora"` and `"svd"` parametrizations; in SVD mode the gate is per-rank
+diagonal.
+
+### Removed architectures
+
+A heavy pruning pass in July 2026 deleted most of the original variant zoo:
+6 LLU modules plus 3 GDN-cond aliases. What survived is a small core —
+`StableLiquidLN` (input-conditioned low-rank factors) and `GDNLiquidLN`
+(GDN-2 sequence state) as control baselines, plus the Engram-LoRA hybrid
+above and the factorized / cross-attention variants. Removed:
+
+| Variant                                                                                        | What it was                                              | Why removed                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LiquidLinear`                                                                                 | Monolithic full `O×I` weight generation per token        | Memory cost `O(B·O·I)`; unusable beyond toy dimensions (97M params at d_model=120). Best benchmarked capacity but no inductive bias for state tracking (catastrophic `permutation_S5`).                                                  |
+| `Rank1LiquidLN`                                                                                | Rank-1 factor generation                                 | Lacked capacity for sequence modeling.                                                                                                                                                                                                  |
+| `SharedMomentumLiquidLN` / `BatchMomentumLiquidLN`                                             | Stateful EMA momentum across batch steps                 | Cross-batch statefulness violates determinism; caused non-deterministic eval, autograd graph leaks, and dynamic allocation overhead.                                                                                                     |
+| `FactorizedBatchMomentumLiquidLN`                                                              | Factorized A/B generation + per-batch momentum           | Same statefulness problems as the momentum family.                                                                                                                                                                                      |
+| `MomentumGDNLiquidLN`                                                                          | GDN-2 as FFN with momentum-conditioned Q/K/V              | Same statefulness problems as the momentum family.                                                                                                                                                                                      |
+| `StableGDNCondLiquidLN` / `FactorizedGDNCondLiquidLN` / `FactBatchMomGDNCondLiquidLN`          | GDN-2-as-conditioner aliases: a GDN-2 recurrence produces a `d_model` cond vector fed to the FFN hypernetwork | The GDN-cond provider path was removed from `LiquidTransformerBlock`. `GDNLiquidLN` keeps GDN-2 as an FFN; external conditioning now flows through the generic `cond` port (`StableLiquidLN`, `FactorizedLiquidLN`, `GDNLiquidLN`, `CrossAttnLoraLN`, `EngramRetrievedLoraLN`) or Engram retrieval. |
+
+**Historical record.** Every benchmark table and analysis section below
+predates the pruning pass and still contains the removed variants. Treat it as
+experiment history — current work should compare the 6 retained variants.
 
 ## DeepSeek Engram Conditional N-gram Memory (`llu/models/engram/`)
 
@@ -43,7 +64,14 @@ The repository also includes an implementation of the **DeepSeek Engram** condit
 - **Deterministic Multi-head N-gram Hashing:** `CompressedTokenizer` maps text morphology into equivalence classes via normalizers; `NgramHashMapping` generates $O(1)$ multi-head coprime N-gram key hashes.
 - **Context-Aware Gating & ShortConv:** `Engram` queries multi-head embedding stores and gates static memory retrievals using RMSNorm-scaled dot-product attention against the hidden state, followed by depthwise 1D causal convolution (`ShortConv`).
 - **Tiered Offloading Backends:** `EngramEmbeddingStore` supports `"auto"`, `"cpu"`, `"disk"` (SSD `np.memmap` binary file offloading in 64k chunks for low-RAM CPU systems), and `"cuda"`.
-- **Conditioning & Additive Routing:** Retried Engram memory can be passed as additive updates (`--engram_mode additive`), fed directly as the `cond` vector to LLU hypernetworks like `StableLiquidLN` (`--engram_mode cond`), or both (`--engram_mode both`).
+- **Conditioning & Additive Routing:** Retrieved Engram memory can be passed as additive updates (`--engram_mode additive`), fed directly as the `cond` vector to LLU hypernetworks like `StableLiquidLN` (`--engram_mode cond`), or both (`--engram_mode both`).
+
+> **Note (2026-07 pruning):** the benchmark and analysis sections below were
+> produced **before** the pruning pass and include architectures that have
+> since been removed (`LiquidLinear`, `Rank1LiquidLN`, the momentum family,
+> and the GDN-cond aliases). They are preserved as a historical record — see
+> [Removed architectures](#removed-architectures) for the removal rationale.
+> Current experiments compare the 6 retained variants.
 
 ## Preliminary benchmark comparison
 
@@ -119,29 +147,28 @@ signal. Raw numbers are in `bench_gdncond_full.txt`.
 
 - **`StableGDNCondLiquidLN` is the strongest of the GDN-2-derived designs.**
   With attention on, it matches the overall best archs (`StableLiquidLN`,
-  `LiquidLinear`) on mse and posts the _highest_ success rate (0.859), and it
-  clearly **beats** the other GDN-2 variants: `GDNLiquidLN` (0.169 mse) and
-  `MomentumGDNLiquidLN` (0.725). The takeaway: feeding GDN-2's recurrence
-  output in as a _conditioner_ for a Stable-Liquid FFN works better than using
-  GDN-2 directly as the FFN transform.
+  `LiquidLinear`) on mse and posts the _highest_ success rate (0.859), beating
+  the other GDN-2 variants: `GDNLiquidLN` (0.169 mse) and
+  `MomentumGDNLiquidLN` (0.725). Feeding GDN-2's recurrence in as a
+  _conditioner_ for a Stable-Liquid FFN works better than using GDN-2 directly
+  as the FFN transform.
 - **The parameter budget is matched.** `StableGDNCondLiquidLN` adds only
-  +132 params (attn) / +126 (no-attn) over `StableLiquidLN`, the GDN-2 cond
+  +132 params (attn) / +126 (no-attn) over `StableLiquidLN`; the GDN-2 cond
   provider was deliberately slimmed (rank = 1, head_dim = 8, num_heads = 2),
   so the comparison is apples-to-apples.
 - **The attention-free ablation behaves correctly.** Every `_noattn` variant
   fails `overwrite_recall` (success*rate = 0). That is \_expected*: the task
   requires looking back at earlier tokens, which pure recurrence (delta-rule
-  memory / momentum) cannot do here. The fact that `StableGDNCondLiquidLN_noattn`
-  fails identically to the other recurrence-only variants confirms the ablation
-  correctly isolates the attention contribution -- GDN-2's `cond` alone is not a
-  substitute for SWA on a hard lookback task.
+  memory / momentum) cannot do. `StableGDNCondLiquidLN_noattn` fails
+  identically to the other recurrence-only variants, which confirms the
+  ablation isolates the attention contribution -- GDN-2's `cond` alone is not
+  a substitute for SWA on a hard lookback task.
 - **The conditioning pattern holds across tasks.** On `permutation_S3`,
   `StableGDNCondLiquidLN` ties the best architecture (`BatchMomentumLiquidLN`,
   0.809) and beats both GDN-2-as-FFN variants (`GDNLiquidLN` 0.791,
   `MomentumGDNLiquidLN` 0.633). Combined with the `overwrite_recall` result
-  (highest success rate, 0.859), feeding GDN-2's recurrence in as a _conditioner_
-  for a Stable-Liquid FFN is consistently stronger than using GDN-2 directly as
-  the FFN transform.
+  (highest success rate, 0.859), the conclusion repeats: conditioning a
+  Stable-Liquid FFN with GDN-2's recurrence beats using GDN-2 as the FFN.
 
 ### Limitations of the testing method
 
@@ -259,25 +286,25 @@ parity; `metric`/`sweep` behave as specified), both return `SMOKE_OK`.
 
 ### Insights, static regime
 
-1. **`RankRLiquidLN` is the clear winner of the static regime.** It is the only
-   LLU that _groks_ modular arithmetic (mod-97 test acc 0.84, clean phase
-   transition) **and** the best Fourier fitter (RMSE 0.0013, ~10x better than the
-   others). Its rank-R, input-conditioned weight modulation appears to carry an
-   inductive bias that helps both discrete symbolic composition and smooth
-   function approximation.
+1. **`RankRLiquidLN` is the clear winner of the static regime.** It is the
+   only LLU that _groks_ modular arithmetic (mod-97 test acc 0.84, clean phase
+   transition) and the best Fourier fitter at the same time (RMSE 0.0013,
+   ~10x better than the rest). Its rank-R, input-conditioned weight modulation
+   seems to carry an inductive bias that helps both discrete symbolic
+   composition and smooth function approximation.
 2. **Momentum variants generalize compositionally but not arithmetically.**
-   `Shared`/`BatchMomentumLiquidLN` solve sparse parity perfectly and fit Fourier
-   adequately, yet neither groks mod-97 within 15k steps. The EMA/momentum state
-   helps _combine_ known features (parity) but does not by itself unlock the
-   arithmetic phase transition.
-3. **`StableLiquidLN` is a safe middle default**, fits Fourier well (RMSE
+   `Shared`/`BatchMomentumLiquidLN` solve sparse parity perfectly and fit
+   Fourier adequately, yet neither groks mod-97 within 15k steps. The
+   EMA/momentum state helps _combine_ known features (parity) but does not by
+   itself unlock the arithmetic phase transition.
+3. **`StableLiquidLN` is a safe middle default**: fits Fourier well (RMSE
    0.016) but is weaker on parity (0.986) and does not grok.
 4. **Parameter efficiency tracks rank.** `RankRLiquidLN` (338K) and
    `Rank1LiquidLN` (24K) are far smaller than `StableLiquidLN` (126K) and
-   `LiquidLinear` (155K-970K for the Transformer) yet match or beat them; the
-   low-rank archs are the better Pareto point.
-5. **Grokking is a weight-decay phenomenon, not an LLU property per se**, the
-   differentiator is _which_ LLU groks, and only `RankRLiquidLN` does.
+   `LiquidLinear` (155K-970K for the Transformer), yet match or beat them;
+   the low-rank archs are the better Pareto point.
+5. **Grokking is a weight-decay phenomenon, not an LLU property per se.**
+   The differentiator is _which_ LLU groks, and only `RankRLiquidLN` does.
 
 ## LLM-Scale Benchmark
 
@@ -294,9 +321,8 @@ plus `baseline` — 14 configurations total at the `tiny` preset. The top 6 SVD
 configs are then re-run at the `scaled` preset (n_embd=192, 4 layers) to test
 whether the tiny-screen ranking holds when the embedding bottleneck is reduced.
 
-`RankRLiquidLN`, `LiquidLinear`, `Rank1LiquidLN`, `GDNLiquidLN`, and
-`MomentumGDNLiquidLN` are excluded: they have no `cond` port, or would stack
-a redundant GDN-2 inside the intermediary.
+`RankRLiquidLN` (no `cond` port) and `GDNLiquidLN` (would stack a redundant
+GDN-2 inside the intermediary) are excluded.
 
 #### Tiny preset results (n_embd=128, 2 layers, 50k tokens)
 
@@ -354,53 +380,52 @@ The tiny preset and the scaled preset produce **opposite** LMB ppl rankings:
 | FactBatchMom           |    **1st (115k)** |      **5th (231k)** |  −4 |
 
 At `tiny` (n_embd=128, 2 layers), the embedding dominates (85% of params) and
-the LLU intermediary is a thin ~200K on top. The factorized + momentum variants
-overfit faster on fewer parameters, appearing to win. At `scaled` (n_embd=192,
-4 layers), the embedding drops to 65% and the LLU gets ~5M params — enough
-room for the monolithic `StableLiquidLN` to express its full capacity advantage.
-`FactBatchMom`'s triple combination (factorized + momentum + GDN-2 cond) may
-be over-regularized at larger scale, or its per-batch EMA smoothing may hurt
-on longer training.
+the LLU intermediary is a thin ~200K on top. The factorized + momentum
+variants overfit faster on fewer parameters, so they appear to win. At
+`scaled` (n_embd=192, 4 layers), the embedding drops to 65% and the LLU gets
+~5M params — enough room for the monolithic `StableLiquidLN` to express its
+full capacity. `FactBatchMom`'s triple combination (factorized + momentum +
+GDN-2 cond) may be over-regularized at larger scale, or its per-batch EMA
+smoothing may hurt on longer training.
 
 #### Insights, comprehensive comparison
 
-1. **`StableLiquidLN` (svd) wins LMB ppl at scale (122,393).** The monolithic
+1. **`StableLiquidLN` (svd) leads LMB ppl at scale (122,393).** The monolithic
    hypernetwork's raw expressive power — a single rank\*(out+in) vector that
    preserves nonlinear interactions between A and B factors — is the strongest
-   intermediary when the model has enough parameters to use it. At tiny, it
-   appeared weak (6th place) because the 200K LLU delta was too small to matter.
+   intermediary when the model has enough parameters to use it. At tiny it
+   looked weak (6th place) because the 200K LLU delta was too small to matter.
 2. **`FactorizedBatchMomentumLiquidLN` wins at tiny but collapses at scale.**
-   The triple combination's regularization effect (factorized init constrains
-   the weight space; momentum smooths updates) helps when capacity is scarce
-   but becomes a liability when the model can express more complex patterns.
-3. **`CrossAttnLoraLN` wins Wiki ppl at both scales** (6,362 at tiny, 6,489 at
-   scaled). Its cross-attention refiner extracts token-level context that the
-   scalar/vector modulators miss, helping on the Wiki distribution regardless
-   of model size. But it trails on LMB ppl — the attention mechanism needs
-   even more data to shine on next-token prediction.
+   The triple combination's regularization (factorized init constrains the
+   weight space; momentum smooths updates) helps when capacity is scarce but
+   becomes a liability when the model can express more complex patterns.
+3. **`CrossAttnLoraLN` holds Wiki ppl at both scales** (6,362 at tiny, 6,489
+   at scaled). Its cross-attention refiner extracts token-level context that
+   scalar/vector modulators miss, regardless of model size. It trails on LMB
+   ppl, though — the attention mechanism needs even more data to shine on
+   next-token prediction.
 4. **SVD beats LoRA on speed** at every scale (~420–450 vs ~490–516 at tiny;
-   ~824–874 vs not tested at scaled). The SVD parameterization's diagonal
-   scaling is consistently cheaper to compute.
-5. **Alpha/scale is more important than rank for LoRA.** LoRA r4 with alpha=1
-   (scale=0.25) beats SVD on LMB ppl by 6%, while LoRA r4 with alpha=4
-   (scale=1.0) is worse. The adaptive path's contribution magnitude matters
-   more than its rank.
+   ~824–874 vs not tested at scaled). The diagonal scaling of SVD is simply
+   cheaper to compute.
+5. **For LoRA, alpha/scale matters more than rank.** LoRA r4 with alpha=1
+   (scale=0.25) beats SVD on LMB ppl by 6%; LoRA r4 with alpha=4 (scale=1.0)
+   is worse. The magnitude of the adaptive path's contribution matters more
+   than its rank.
 6. **All `ours` beat `baseline` at both scales.** At tiny: 114k–160k vs 151k
    LMB ppl. At scaled: 122k–231k vs 215k. The SWA + GDN-2 conditioner +
    liquid intermediary pattern helps regardless of model size.
 7. **The baseline is slowest** at every scale (537 ms/step at tiny, 1,107 at
-   scaled) because it uses more layers to match the param budget.
-8. **LMB acc is 0.0 everywhere** — both 50k tokens at tiny and 100k at scaled
-   are far from the accuracy/grokking regime. Only ppl differences are
+   scaled) because it stacks more layers to match the param budget.
+8. **LMB acc is 0.0 everywhere.** Both 50k tokens at tiny and 100k at scaled
+   are far from the accuracy/grokking regime; only ppl differences are
    informative.
-9. **The ranking instability is the most important finding.** It means the
-   tiny-screen results cannot be extrapolated to larger models. The correct
-   approach is to test at the target scale directly, which the scaled results
-   now enable.
+9. **The ranking instability is the most important finding.** Tiny-screen
+   results cannot be extrapolated to larger models, so the right move is to
+   test at the target scale directly — which the scaled results now enable.
 10. **These are still directional, not convergence, numbers.** At 100k tokens /
-    scaled, the runs are short snapshots. To get convergence-grade verdicts,
+    scaled, the runs are short snapshots. For convergence-grade verdicts,
     scale to `small` (embed 256–512, millions of tokens, 1k+ steps) and test
-    `StableLiquidLN` (svd) — the scaled winner — against `CrossAttnLoraLN`.
+    `StableLiquidLN` (svd), the scaled winner, against `CrossAttnLoraLN`.
 
 ### Key Insights from LLM Scaling & Optimization
 
@@ -433,30 +458,30 @@ steps) across `baseline` + 6 intermediary LLNs × 2 parametrizations, and
   `StableGDNCondLiquidLN` and `StableLiquidLN` / `LiquidLinear` lead on
   recall/permutation; feeding GDN-2's recurrence in as a _conditioner_ for a
   Stable-Liquid FFN beats using GDN-2 directly as the FFN transform. In the
-  **static regime** (`train_io.py`), `RankRLiquidLN` is the standout, it is the
-  _only_ LLU that groks modular arithmetic (mod-97 test acc 0.84) and it is
-  also the best Fourier fitter (RMSE 0.0013).
-- **Practical pick:** `StableGDNCondLiquidLN` for sequence modeling with
-  attention; `RankRLiquidLN` for static / symbolic tasks; `StableLiquidLN` as
-  the dependable all-rounder.
+  **static regime** (`train_io.py`), `RankRLiquidLN` is the standout: the
+  _only_ LLU that groks modular arithmetic (mod-97 test acc 0.84) and also the
+  best Fourier fitter (RMSE 0.0013).
+- **Practical pick:** `CrossAttnLoraLN` / `EngramRetrievedLoraLN` for
+  sequence-conditioned modeling with attention; `RankRLiquidLN` for static /
+  symbolic tasks; `StableLiquidLN` as the dependable all-rounder.
 - **Momentum family is compositional but not arithmetic.** `Shared` /
   `BatchMomentumLiquidLN` solve sparse parity perfectly and fit Fourier
-  adequately, yet neither groks mod-97 within 15k steps, EMA state helps
+  adequately, yet neither groks mod-97 within 15k steps. The EMA state helps
   _combine_ known features but not the arithmetic phase transition.
 - **Parameter efficiency tracks rank.** Low-rank archs (`Rank1LiquidLN` 24K,
-  `RankRLiquidLN` 338K) are the best Pareto point, far fewer params than
-  `StableLiquidLN` (126K) or `LiquidLinear` (155K-970K) with equal-or-better
-  quality. `LiquidLinear` (full hypernetwork) is a parameter/latency hog with no
-  quality payoff.
+  `RankRLiquidLN` 338K) are the best Pareto point: far fewer params than
+  `StableLiquidLN` (126K) or `LiquidLinear` (155K-970K), with equal-or-better
+  quality. `LiquidLinear` (full hypernetwork) is a parameter/latency hog with
+  no quality payoff.
 - **CPU feasibility shapes what is measurable.** The LLU hypernetwork forward
   costs ~250 ms/step (core archs) to ~5.7 s/step (CrossAttn / GDN) on this
   i5-8250U, so the Transformer-synthetic matrix is not CPU-feasible for
-  convergence, short-horizon runs only confirm all archs _optimize_ similarly.
+  convergence; short-horizon runs only confirm all archs _optimize_ similarly.
   The static IO benchmark is the right screening tool on this hardware. GDN-2 /
   CrossAttn archs need `einops` (supplied via `PYTHONPATH=/tmp/einops_lib`, no
   system change).
-- **Grokking is a weight-decay phenomenon, not an LLU property per se**, the
-  differentiator is _which_ LLU groks, and only `RankRLiquidLN` does.
+- **Grokking is a weight-decay phenomenon, not an LLU property per se.**
+  The differentiator is _which_ LLU groks, and only `RankRLiquidLN` does.
 - **LLM intermediary comparison (this pass).** `bench_llm_all.py` ran at the CPU
   `tiny` preset (50k tokens, 150 steps, early stop) across `baseline` + 6
   intermediary LLNs × 2 parametrizations (svd/lora), and `bench_llm_scaled.py`
@@ -503,26 +528,26 @@ steps) across `baseline` + 6 intermediary LLNs × 2 parametrizations, and
 
 #### Key findings: LoRA rank sweep
 
-1. **Alpha matters more than rank.** LoRA r4 with alpha=1 (scale=0.25) wins LMB
-   ppl (137k), beating SVD (146k) by 6%. The smaller scale acts as a
-   regularizer — the adaptive path contributes less per step, preventing
+1. **Alpha matters more than rank.** LoRA r4 with alpha=1 (scale=0.25) leads
+   LMB ppl (137k), beating SVD (146k) by 6%. The smaller scale acts as a
+   regularizer: the adaptive path contributes less per step, which prevents
    overfitting early in training.
-2. **SVD still wins Wiki ppl** (6,192 vs 6,675 for the best LoRA). The diagonal
-   scaling's inductive bias (orthogonal factorization, no dead gradients) helps
-   on the Wiki distribution regardless of alpha.
+2. **SVD keeps Wiki ppl** (6,192 vs 6,675 for the best LoRA). The diagonal
+   scaling's inductive bias (orthogonal factorization, no dead gradients)
+   helps on the Wiki distribution regardless of alpha.
 3. **Rank 1 LoRA is surprisingly competitive.** With only 7.7M params (same as
-   baseline), it achieves 153k LMB ppl — only 10k behind SVD. A single rank-1
+   baseline) it reaches 153k LMB ppl, just 10k behind SVD. A single rank-1
    factor pair is enough for the intermediary's role.
-4. **High rank + high alpha hurts.** LoRA r8 with alpha=8 has the worst LMB ppl
-   (191k). Too much capacity combined with too much scale causes the adaptive
-   path to dominate and overfit.
+4. **High rank + high alpha hurts.** LoRA r8 with alpha=8 has the worst LMB
+   ppl (191k): too much capacity combined with too much scale makes the
+   adaptive path dominate and overfit.
 5. **SVD is fastest** (457 ms/step) among quality-competitive configs. LoRA r1
-   is close (443 ms/step) but r16 is 2x slower (874 ms/step).
+   is close (443 ms/step); r16 is 2x slower (874 ms/step).
 6. **The "fair" comparison (alpha=rank, scale=1.0) favors SVD** on both Wiki
    and LMB. LoRA only wins when alpha is tuned down (alpha=1, scale=0.25),
    which changes the effective scale rather than the parameterization itself.
 
-## All-Architecture Preliminary Benchmark (all 11 LLUs, two regimes)
+## All-Architecture Preliminary Benchmark (11 architectures, pre-pruning)
 
 > **⚠️ IMPORTANT DISCLAIMER: These are preliminary, low-fidelity results.** This
 > comparison runs every registered LLU architecture across both the sequence
@@ -617,16 +642,16 @@ Config: hidden=32, 1 layer, rank=4, 100 steps, batch=64, seed=0. Test metric
 ### Preliminary observations (directional, not conclusions)
 
 - **All 11 architectures train without NaN/Inf** on both sequence and static
-  tasks at this tiny scale, confirming the codebase is sound end-to-end.
+  tasks at this tiny scale, so the codebase is sound end-to-end.
 - **`StableGDNCondLiquidLN`** leads on several sequence tasks (correlated_key,
-  induction_heads, permutation_S3) — the GDN-2-as-conditioner pattern appears
-  to help even at this scale.
-- **`LiquidLinear`** wins capacity and selective_copy but catastrophically
+  induction_heads, permutation_S3); the GDN-2-as-conditioner pattern seems to
+  help even at this scale.
+- **`LiquidLinear`** takes capacity and selective_copy but catastrophically
   fails permutation_S5 (58.6 vs ~3.5), suggesting the full-hypernetwork
   approach lacks the inductive bias for state-tracking tasks.
 - **`FactorizedLiquidLN`** is competitive across both regimes and leads the
-  static IO tasks on modular arithmetic — the factorized A/B generation
-  pattern from Zhyper appears to carry a useful inductive bias.
+  static IO tasks on modular arithmetic; the factorized A/B generation pattern
+  from Zhyper seems to carry a useful inductive bias.
 - **Speed varies ~10x** across architectures: CrossAttnLoraLN and GDN-2
   variants are fastest (~3-5 ms/step); LiquidLinear and Rank1 are slowest
   (~16-140 ms/step). Momentum variants fall in the middle (~11-12 ms/step).
@@ -708,41 +733,41 @@ seed=0, no sweeps, CPU-only.
 
 1. **`FactorizedBatchMomentumGDNCondLiquidLN` wins 3 of 10 tasks and ties 2.**
    It is the best factorized variant on induction_heads (3.502, beating
-   StableGDN's 3.54), permutation_S3 (1.196 eval loss, 0.550 accuracy — the
+   StableGDN's 3.54), permutation_S3 (1.196 eval loss, 0.550 accuracy, the
    best of all 5 archs), permutation_S5 (3.588, marginally beating StableGDN's
    3.593), xor (0.453, second only to monolithic BatchMom's 0.333), and
    in_context_regression (5.114, essentially tied with FactGDN's 5.109). The
-   combination of factorized init + momentum + GDN-2 conditioning is the most
-   versatile factorized variant.
+   factorized init + momentum + GDN-2 conditioning combo is the most versatile
+   factorized variant.
 
 2. **GDN-2 conditioning boosts factorized momentum on temporal tasks.** Adding
    the GDN-2 conditioner to `FactorizedBatchMomentumLiquidLN` improves
    induction_heads (3.939 → 3.502), needle (1.262 → 1.236), and selective_copy
-   (1.380 → 0.820). The GDN-2 recurrence provides a sequence-wide context that
-   the per-batch momentum alone cannot capture — distance-tracking and
-   content-based gating both benefit.
+   (1.380 → 0.820). The GDN-2 recurrence supplies sequence-wide context that
+   per-batch momentum alone cannot: distance-tracking and content-based gating
+   both benefit.
 
-3. **`StableGDNCondLiquidLN` still wins the hardest tasks.** It retains the
-   edge on capacity (1.060), correlated_key (1.023), and selective_copy (0.214)
-   — tasks where the monolithic hypernetwork's raw capacity matters more than
-   the factorized init's gradient quality. The monolithic pattern has ~5% fewer
-   parameters and generates a single rank\*out+in vector, which gives it more
-   expressive power per parameter on tasks that need it.
+3. **`StableGDNCondLiquidLN` still holds the hardest tasks.** It keeps the
+   edge on capacity (1.060), correlated_key (1.023), and selective_copy
+   (0.214), tasks where the monolithic hypernetwork's raw capacity matters
+   more than the factorized init's gradient quality. The monolithic pattern
+   has ~5% fewer parameters and emits a single rank\*out+in vector, giving it
+   more expressive power per parameter where it counts.
 
 4. **XOR remains the hardest signal for all factorized variants.** The
    monolithic `BatchMomentumLiquidLN` (0.333) still beats every factorized
-   variant (best: FactBatchMom+GDN at 0.453). The nonlinear gating pattern of
-   the monolithic hypernetwork appears better suited for XOR-like composition.
-   However, FactBatchMom+GDN closes the gap significantly vs FactGDN (0.788).
+   variant (best: FactBatchMom+GDN at 0.453). The monolithic hypernetwork's
+   nonlinear gating pattern appears better suited to XOR-like composition;
+   still, FactBatchMom+GDN closes most of the gap vs FactGDN (0.788).
 
 5. **The triple combination is cost-effective.** `FactBatchMomGDNCondLiquidLN`
    has ~6% more params than `StableGDNCondLiquidLN` (same as FactGDN) but is
-   ~4% faster (143 vs 148 ms/step) because the factorized projections are
+   ~4% faster (143 vs 148 ms/step), because the factorized projections are
    cheaper than the monolithic hypernetwork. It wins or ties on 5/10 tasks,
    making it the best factorized variant overall.
 
 6. **These are 30-step smoke results.** All observations need validation with
-   longer runs, multiple seeds, and hyperparameter sweeps. The relative
+   longer runs, multiple seeds, and hyperparameter sweeps; the relative
    ordering may change at convergence.
 
 ## Architectural Analysis: Design → Results
@@ -761,230 +786,214 @@ axes:
 **Axis A — Hypernetwork topology:**
 
 - **Monolithic** (single MLP outputs `rank*(out+in)` vector):
-  `StableLiquidLN`, `BatchMomentumLiquidLN`, `SharedMomentumLiquidLN`.
-  Maximum expressive power per parameter; the concatenated output preserves
-  nonlinear interactions between A and B factors.
+  `StableLiquidLN`. Maximum expressive power per parameter; the concatenated
+  output preserves nonlinear interactions between A and B factors.
 - **Factorized** (two separate `proj_a` / `proj_b` MLPs):
-  `FactorizedLiquidLN`, `FactorizedBatchMomentumLiquidLN`. Cleaner gradient
-  flow into each factor independently (Zhyper, 2025); better-structured weight
-  space geometry (LatentSkill, 2026), but the independent projections break
-  nonlinear interactions between A and B.
-- **Full-rank** (no low-rank bottleneck): `LiquidLinear`. Generates a full
-  `d×out` weight matrix per token — maximum capacity, no inductive bias.
+  `FactorizedLiquidLN`. Cleaner gradient flow into each factor independently
+  (Zhyper, 2025); better-structured weight space geometry (LatentSkill, 2026),
+  but the independent projections break nonlinear interactions between A and B.
 - **Low-rank static** (learned factors, no hypernetwork):
-  `Rank1LiquidLN`, `RankRLiquidLN`. No per-token generation; factors are
-  learned parameters modulated by the input.
+  `RankRLiquidLN`. No per-token generation; factors are learned parameters
+  modulated by the input.
 - **Cross-attention** (learned factors refined by cross-attn):
   `CrossAttnLoraLN`. Refines static factors using the conditioning sequence
   as keys/values — the cheapest per-step cost among the expressive variants.
 - **GDN-2 as FFN** (recurrence replaces the FFN):
-  `GDNLiquidLN`, `MomentumGDNLiquidLN`. The recurrence _is_ the FFN, not a
-  conditioner for it.
+  `GDNLiquidLN`. The recurrence _is_ the FFN, not a conditioner for it.
+- **Retrieval-then-modulate** (Engram hashing + LoRA expert bank + diagonal
+  gate): `EngramRetrievedLoraLN`. Engram n-gram hashing retrieves a LoRA
+  expert `(A_k, B_k)` from a learned bank; a sequence-conditioned diagonal
+  gate `diag(SiLU(W_g x))` modulates it.
 
 **Axis B — Conditioning pathway:**
 
-- **None** (input-only): `LiquidLinear`, `Rank1LiquidLN`, `RankRLiquidLN`,
-  `FactorizedLiquidLN`. Each token sees only its own embedding.
-- **`cond` port** (external conditioning signal):
-  `StableLiquidLN`, `FactorizedLiquidLN`. Accept an optional `cond` tensor
-  of arbitrary shape, enabling context injection from upstream layers.
-- **GDN-2 as conditioner** (recurrence produces `cond` fed to FFN):
-  `StableGDNCondLiquidLN`, `FactorizedGDNCondLiquidLN`,
-  `FactBatchMomGDNCondLiquidLN`. A small GDN-2 recurrence compresses the
-  full sequence into a `d_model`-sized vector that conditions each FFN
-  sublayer — the Doc-to-LoRA (2026) pattern.
+- **None** (input-only): `RankRLiquidLN`. Each token sees only its own
+  embedding.
+- **`cond` port** (external conditioning signal): `StableLiquidLN`,
+  `FactorizedLiquidLN`, `GDNLiquidLN`, `CrossAttnLoraLN`,
+  `EngramRetrievedLoraLN`. Accept an optional `cond` tensor of arbitrary
+  shape, enabling context injection from upstream layers.
 - **Cross-attention** (conditioning via attention over source):
   `CrossAttnLoraLN`. Learned factor matrices attend over the conditioning
   sequence — the SHINE (2026) / HyperPrompt (2022) pattern.
+- **Engram retrieval** (conditioning via hashed n-gram lookup):
+  `EngramRetrievedLoraLN`. Retrieval keyed by deterministic multi-head
+  n-gram hashes (`llu/models/engram/`).
 
-**Axis C — Temporal smoothing:**
-
-- **None**: all static variants.
-- **Per-batch EMA momentum**: `BatchMomentumLiquidLN`,
-  `FactorizedBatchMomentumLiquidLN`. Smooths factor generation across
-  examples within a batch, acting as a short-term memory.
-- **Shared EMA**: `SharedMomentumLiquidLN`. Single shared state across all
-  examples — more aggressive smoothing, less per-example flexibility.
+**Axis C — Temporal smoothing:** all retained variants are static — the
+EMA-momentum family that populated this axis was removed (see
+[Removed architectures](#removed-architectures)).
 
 ### Why the two regimes reward different architectures
 
-The most striking finding across all benchmarks is that **the same architecture
-can be the best in one regime and mediocre in another**. This is not noise —
-it reveals that the inductive biases needed for sequence modeling vs. static
-function approximation are fundamentally different.
+Across every benchmark, the same architecture can top one regime and look
+mediocre in another. That is not noise. Sequence modeling and static function
+approximation reward different inductive biases, and the pattern repeats no
+matter which tasks you look at.
 
 #### Sequence regime winners: `StableGDNCondLiquidLN`, `StableLiquidLN`, `LiquidLinear`
 
-These architectures share a property: **they generate weights from the full
-input context in a single forward pass, with no temporal smoothing**. The
-monolithic hypernetwork in `StableLiquidLN` produces a single rank\*(out+in)
-vector, giving it maximum expressive power per parameter. This matters on tasks
-like `overwrite_recall` (highest success rate: 0.859) and `correlated_key`
-(best eval loss: 0.967), where the model must react to each token's exact
-position and content.
+What these three share: **weights generated from the full input context in a
+single forward pass, with no temporal smoothing**. The monolithic hypernetwork
+in `StableLiquidLN` emits one rank\*(out+in) vector, which maximizes
+expressive power per parameter. That pays off on `overwrite_recall` (highest
+success rate: 0.859) and `correlated_key` (best eval loss: 0.967), tasks
+where the model has to react to each token's exact position and content.
 
-`StableGDNCondLiquidLN` adds only +132 params over `StableLiquidLN` but
-achieves the highest success rate on `overwrite_recall` (0.859 vs 0.836) and
-wins `correlated_key` (0.967). The explanation: GDN-2's recurrence compresses
-the full sequence into a `d_model`-sized vector, giving each FFN sublayer
-access to _global_ context that the per-token hypernetwork alone cannot
-capture. This is the encode→generate pattern from Doc-to-LoRA (2026).
+`StableGDNCondLiquidLN` adds only +132 params over `StableLiquidLN`, yet it
+reaches the highest success rate on `overwrite_recall` (0.859 vs 0.836) and
+wins `correlated_key` (0.967). The mechanism: GDN-2's recurrence compresses
+the full sequence into a `d_model`-sized vector, so each FFN sublayer sees
+_global_ context that a per-token hypernetwork cannot capture on its own.
+This is the encode→generate pattern from Doc-to-LoRA (2026).
 
-`LiquidLinear` wins `capacity` (1.077) and `selective_copy` (0.047) — the
-only architecture with a near-perfect score on the hardest task — but
-**catastrophically fails** `permutation_S5` (58.6 vs ~3.5 for everything
-else). The full-rank weight generation (`d×out` matrix per token) provides
-raw capacity but _no inductive bias_ for state tracking. At d_model=120
-(permutation_S5), it blows up to 97M params, and the unconstrained weight
-generation lacks the factorization structure that helps other architectures
-track permutation state.
+`LiquidLinear` takes `capacity` (1.077) and `selective_copy` (0.047) — the
+only near-perfect score on the hardest task — but **catastrophically fails**
+`permutation_S5` (58.6 vs ~3.5 for everything else). Generating a full
+`d×out` matrix per token buys raw capacity with _no inductive bias_ for state
+tracking; at d_model=120 that costs 97M params, and the unconstrained weight
+generation lacks the factorization other architectures use to track
+permutation state.
 
 #### Static regime winner: `RankRLiquidLN`
 
-`RankRLiquidLN` dominates the static regime — it is the **only architecture
+`RankRLiquidLN` dominates the static regime. It is the **only architecture
 that groks mod-97** (test acc 0.84, clean phase transition at step ~6500)
-and achieves the best Fourier fit (RMSE 0.0013, ~10x better than others).
-Yet it performs poorly on sequence tasks (0.696 mse on `overwrite_recall`,
-last among 300-step runs with attention).
+and its Fourier fit is ~10x better than the rest (RMSE 0.0013). On sequence
+tasks it falls apart (0.696 mse on `overwrite_recall`, last among the
+300-step runs with attention).
 
-The explanation: `RankRLiquidLN` uses learned, _input-conditioned_ low-rank
-factor modulation (A and B factors are functions of the input via learned
-weight matrices). In the static regime, where each input is independent and
-the model must learn compositional structure, this per-input adaptive
-modulation provides exactly the right inductive bias — it can specialize its
-weight matrix for each (a,b) pair in modular arithmetic. In the sequence
-regime, the absence of a `cond` port and the static nature of the factor
-generation (no temporal context) make it unable to perform lookback or
-track state across tokens.
+The mechanism explains both halves. `RankRLiquidLN` modulates learned
+low-rank factors with the input (A and B are functions of the input through
+learned weight matrices). In the static regime, where every input is
+independent and the model has to learn compositional structure, per-input
+adaptive modulation is exactly the right bias: it can specialize its weight
+matrix for each (a,b) pair in modular arithmetic. In the sequence regime
+there is no `cond` port and factor generation stays static, with no temporal
+context — so it cannot look back or track state across tokens.
 
 #### Momentum variants: compositional but not arithmetic
 
 `SharedMomentumLiquidLN` and `BatchMomentumLiquidLN` solve sparse parity
-perfectly (acc 1.000) and fit Fourier adequately, but **never grok mod-97**
+perfectly (acc 1.000) and fit Fourier adequately, yet **never grok mod-97**
 within 15k steps (test acc ~0.01). The EMA state helps _combine_ known
-features (XOR of known bits) but does not by itself unlock the arithmetic
-phase transition. The momentum smooths weight updates across examples, which
-is useful for composition (parity) but harmful for the sharp, sudden
-generalization that grokking requires — grokking needs the model to
-"discover" a new algorithm, and smoothing delays that discovery.
+features (XOR of known bits) but cannot by itself trigger the arithmetic
+phase transition. Smoothing weight updates across examples helps composition
+(parity) and hurts the sharp, sudden generalization grokking needs — the
+model has to "discover" a new algorithm, and smoothing delays discovery.
 
 ### The factorized vs. monolithic tradeoff
 
-The factorized variant comparison (5 architectures, 10 tasks) reveals a
-nuanced picture:
+The factorized comparison (5 architectures, 10 tasks) paints a nuanced
+picture:
 
 **Where factorization helps:** `FactBatchMomGDNCondLiquidLN` wins
 `induction_heads` (3.502), `permutation_S3` (1.196 / 0.550 acc), and `xor`
-(0.453 eval loss). These tasks require _composition of discrete features_ —
-exactly what the separate `proj_a` / `proj_b` MLPs are designed for. By
-generating A and B factors independently, the model gets cleaner gradient
-flow into each factor (Zhyper, 2025) and better-structured weight space
-geometry (LatentSkill, 2026).
+(0.453 eval loss). These tasks need _composition of discrete features_,
+which is exactly what separate `proj_a` / `proj_b` MLPs are built for:
+generating A and B independently gives cleaner gradient flow into each
+factor (Zhyper, 2025) and better-structured weight space geometry
+(LatentSkill, 2026).
 
-**Where monolithic wins:** `StableGDNCondLiquidLN` retains the edge on
+**Where monolithic wins:** `StableGDNCondLiquidLN` keeps the edge on
 `capacity` (1.060), `correlated_key` (1.023), and `selective_copy` (0.214).
-These tasks need _raw expressive power_ — the monolithic hypernetwork
-generates a single vector with more degrees of freedom per parameter. The
-factorized approach's constraint (separate projections for A and B) acts as
-a regularizer that helps generalization on structured tasks but limits peak
-capacity on tasks requiring maximum expressiveness.
+These tasks need _raw expressive power_. The monolithic hypernetwork emits a
+single vector with more degrees of freedom per parameter; the factorized
+constraint (separate projections for A and B) acts as a regularizer that
+helps generalization on structured tasks but caps peak capacity.
 
-**XOR is the revealing case:** The monolithic `BatchMomentumLiquidLN`
-(0.333) beats every factorized variant (best: FactBatchMom+GDN at 0.453).
-XOR requires _nonlinear gating_ — a single MLP that computes `x1 ⊕ x2`
-needs to learn a nonlinear decision boundary. The monolithic hypernetwork,
-which outputs a single concatenated vector that gets reshaped into A and B,
-preserves the nonlinear interaction between the two factors. The factorized
-approach, with its independent projections, breaks this interaction. However,
-adding GDN-2 conditioning to the factorized variant (FactBatchMom+GDN: 0.453)
-significantly closes the gap vs. FactGDN alone (0.788), suggesting that
-sequence-wide context partially compensates for the lost nonlinear
-interaction.
+**XOR is the revealing case:** the monolithic `BatchMomentumLiquidLN` (0.333)
+beats every factorized variant (best: FactBatchMom+GDN at 0.453). XOR needs
+_nonlinear gating_ — a single MLP computing `x1 ⊕ x2` has to learn a
+nonlinear decision boundary. A monolithic hypernetwork outputs one
+concatenated vector that reshapes into A and B, preserving the nonlinear
+interaction between the two factors; independent projections break it.
+Adding GDN-2 conditioning to the factorized variant (FactBatchMom+GDN: 0.453)
+closes much of that gap vs FactGDN alone (0.788), so sequence-wide context
+partially compensates for the lost interaction.
 
 ### Speed-parameter-quality tradeoffs
 
 | Architecture          | Params (tiny/scaled) | Speed (ms/step, scaled) | Quality (LMB ppl, scaled) | Pareto?               |
 | --------------------- | -------------------- | ----------------------: | ------------------------- | --------------------- |
-| Rank1LiquidLN         | 24K / —              |              ~16 (tiny) | —                         | Best param efficiency |
 | RankRLiquidLN         | 58K / —              |              ~15 (tiny) | —                         | Best static regime    |
 | StableLiquidLN        | 126K / 14.7M         |                     837 | **122,393**               | Best at scale         |
-| StableGDNCondLiquidLN | 126K / —             |               ~8 (tiny) | —                         | Best sequence (tiny)  |
 | CrossAttnLoraLN       | 135K / 15.1M         |                     874 | 163,278                   | Best Wiki ppl         |
-| LiquidLinear          | 155K / —             |          ~24-140 (tiny) | —                         | Capacity trap         |
 
-At LLM scale, SVD parametrization is consistently faster than LoRA. The ranking
-**inverts between presets**: factorized variants win at tiny, monolithic wins at
-scaled. `StableLiquidLN` (svd) is the scaled winner (122k LMB ppl, 837 ms/step);
-`CrossAttnLoraLN` wins Wiki ppl at both scales.
+At LLM scale, SVD is consistently faster than LoRA, and the ranking **inverts
+between presets**: factorized variants win at tiny, monolithic wins at scaled.
+`StableLiquidLN` (svd) is the scaled winner (122k LMB ppl, 837 ms/step);
+`CrossAttnLoraLN` holds Wiki ppl at both scales.
 
 LoRA rank sweep (tiny, 200k tokens): SVD r4 (457 ms/step, 146k LMB ppl) is the
-best speed-quality tradeoff. LoRA r1 (443 ms/step, 153k LMB ppl) is fastest but
-slightly worse quality. LoRA r4 a1 (506 ms/step, 138k LMB ppl) is best quality
-but 10% slower. LoRA r16 (874 ms/step, 166k) is 2x slower with no quality gain.
+best speed-quality tradeoff. LoRA r1 (443 ms/step, 153k LMB ppl) is the
+fastest but slightly worse; LoRA r4 a1 (506 ms/step, 138k LMB ppl) has the
+best quality at ~10% more time; LoRA r16 (874 ms/step, 166k) is 2x slower
+with no quality gain.
 
 ### The attention ablation pattern
 
 Every `_noattn` variant fails `overwrite_recall` (success*rate = 0.000) and
-performs worse on `permutation_S3` than the attention-equipped version. This
-is a clean result: the recurrence-only path (delta-rule memory / EMA
-momentum) cannot perform lookback operations. The one exception is
-`GDNLiquidLN_noattn` on `permutation_S3` (0.932 acc — the best single
-score in the entire 300-step table), which suggests GDN-2's stateful
-recurrence \_can* learn permutation tracking when the sequence is short
-enough and the recurrence has sufficient capacity. But it fails on
-`overwrite_recall`, confirming that recurrence alone cannot replace attention
-for long-range memory access.
+does worse on `permutation_S3` than its attention-equipped version. Clean
+result: the recurrence-only path (delta-rule memory / EMA momentum) cannot
+do lookback. One exception stands out — `GDNLiquidLN_noattn` on
+`permutation_S3` (0.932 acc, the best single score in the whole 300-step
+table). GDN-2's stateful recurrence \_can* learn permutation tracking when
+the sequence is short and the recurrence has enough capacity. It still fails
+`overwrite_recall`, though, confirming that recurrence alone cannot replace
+attention for long-range memory access.
 
 ### The embedding bottleneck in LLM scale
 
 At the `tiny` preset, the GPT-2 embedding (50,257 × 128 = 6.4M params)
-dominates the 7.5M total (85%). The LLU delta is only ~200K, making
-architectural differences nearly invisible. At `scaled` (n_embd=192, 4 layers),
-the embedding drops to 65% (9.6M of 14.6M) and the LLU gets ~5M params —
-enough to see real differences.
+dominates the 7.5M total (85%). The LLU delta is only ~200K, so architectural
+differences are nearly invisible. At `scaled` (n_embd=192, 4 layers), the
+embedding drops to 65% (9.6M of 14.6M) and the LLU gets ~5M params — enough
+to see real differences.
 
-The most striking finding: **the ranking inverts between scales.** At `tiny`,
+And the ranking **inverts between scales**. At `tiny`,
 `FactorizedBatchMomentumLiquidLN` (svd) leads LMB ppl (114k); at `scaled`,
 `StableLiquidLN` (svd) takes the lead (122k) while FactBatchMom falls to last
 (231k). The factorized + momentum variants overfit faster on few parameters,
-appearing to win at tiny scale, but the monolithic hypernetwork's raw expressive
-power dominates when the model has room to use it.
+so they look like winners at tiny scale; the monolithic hypernetwork's raw
+expressive power dominates once the model has room to use it.
 
-`CrossAttnLoraLN` wins Wiki ppl at both scales (6,362 tiny, 6,489 scaled) —
-its cross-attention refiner consistently extracts token-level context that the
-scalar/vector modulators miss, regardless of model size.
+`CrossAttnLoraLN` holds Wiki ppl at both scales (6,362 tiny, 6,489 scaled):
+its cross-attention refiner extracts token-level context that scalar/vector
+modulators miss, regardless of model size.
 
-SVD parametrization is consistently faster than LoRA (~420–450 vs ~490–516 at
-tiny; ~824–874 at scaled) and the diagonal scaling is apparently a better
-inductive bias at these scales.
+SVD is consistently faster than LoRA (~420–450 vs ~490–516 at tiny; ~824–874
+at scaled), and the diagonal scaling appears to be the better inductive bias
+at these scales.
 
-`RankRLiquidLN` — the static-regime champion — is excluded from the LLM
-comparison because it has **no `cond` port**. Adding a `cond` port to it is
-the highest-value next step, as it would test whether the architecture that
-groks modular arithmetic also wins on language modeling.
+`RankRLiquidLN`, the static-regime champion, sits out of the LLM comparison
+because it has **no `cond` port**. Adding one is the highest-value next step:
+it would test whether the architecture that groks modular arithmetic also
+wins on language modeling.
 
 ### Practical recommendations
 
-| Task type                  | Best architecture                      | Why                                                                         |
-| -------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
-| Sequence recall/lookup     | `StableGDNCondLiquidLN`                | GDN-2 conditioner provides global context that per-token hypernetworks miss |
-| Sequence state tracking    | `StableLiquidLN` or `FactBatchMom+GDN` | Monolithic capacity or factorized composition + momentum                    |
-| Static symbolic (grokking) | `RankRLiquidLN`                        | Input-conditioned low-rank modulation learns compositional structure        |
-| Static function fitting    | `RankRLiquidLN`                        | Same mechanism — adaptive per-input weights approximate smooth functions    |
-| Composition (parity)       | `Shared/BatchMomentumLiquidLN`         | EMA state helps combine known features                                      |
-| LLM intermediary (tiny)    | `FactBatchMomentumLiquidLN` (svd)      | Factorized init + momentum + GDN-2 conditioning at small scale              |
-| LLM intermediary (scaled)  | `StableLiquidLN` (svd)                 | Monolithic hypernetwork's capacity dominates when model is large enough     |
-| Safe default               | `StableLiquidLN`                       | Wins at scale, middle of pack at tiny, never worst                          |
+| Task type                  | Best architecture                      | Why                                                                        |
+| -------------------------- | -------------------------------------- | -------------------------------------------------------------------------- |
+| Sequence recall/lookup     | `CrossAttnLoraLN` / `EngramRetrievedLoraLN` | Cross-attention over the conditioning sequence, or Engram-hashed LoRA retrieval |
+| Sequence state tracking    | `GDNLiquidLN`                          | GDN-2's stateful recurrence tracks state across tokens                     |
+| Static symbolic (grokking) | `RankRLiquidLN`                        | Input-conditioned low-rank modulation learns compositional structure       |
+| Static function fitting    | `RankRLiquidLN`                        | Same mechanism — adaptive per-input weights approximate smooth functions   |
+| LLM intermediary (scaled)  | `StableLiquidLN` (svd)                 | Monolithic hypernetwork's capacity dominates when model is large enough    |
+| Safe default               | `StableLiquidLN`                       | Wins at scale, middle of pack at tiny, never worst                         |
+
+(Removed variants are gone from these recommendations; see
+[Removed architectures](#removed-architectures).)
 
 ### The deeper lesson
 
-**No single architecture dominates all regimes — or all scales.** The inductive
-biases that help on static compositional tasks (learned adaptive factors) are
-different from those that help on sequence recall (global context conditioning)
-or fast fitting (momentum smoothing). Even within the LLM regime, the ranking
-**inverts between model scales**: factorized variants with momentum win at tiny,
-the monolithic hypernetwork wins at scaled. The right LLU depends on both the
-task and the available parameter budget.
+**No single architecture dominates all regimes — or all scales.** The biases
+that help on static compositional tasks (learned adaptive factors) are not the
+ones that help on sequence recall (global context conditioning) or fast
+fitting (momentum smoothing). Even inside the LLM regime the ranking **inverts
+between model scales**: factorized variants with momentum win at tiny, the
+monolithic hypernetwork wins at scaled. Pick the LLU to the task and the
+parameter budget.
 
 ## Prior Art & Inspirations
 
@@ -1008,8 +1017,9 @@ taken and what was not.
    [ICLR](https://arxiv.org/abs/1906.00695).
    **What we took:** The task-conditioned framing — the hypernetwork is
    conditioned on some signal and produces task-specific weights. Our `cond`
-   port and the GDN-2 conditioning path (`StableGDNCondLiquidLN`) are direct
-   descendants of this idea.
+   port and the (now-removed) GDN-2 conditioning path — previously
+   `StableGDNCondLiquidLN`, see [Removed architectures](#removed-architectures)
+   — are direct descendants of this idea.
    **What we did not take:** Their continual-learning evaluation protocol;
    we focus on architectural variants, not catastrophic forgetting.
 
@@ -1109,11 +1119,12 @@ taken and what was not.
     Internalize Contexts_,
     [arXiv:2602.15902](https://arxiv.org/abs/2602.15902).
     **What we took:** Using a Perceiver encoder to compress long contexts
-    before LoRA generation. This informed our GDN-2 conditioning path:
-    `StableGDNCondLiquidLN` uses a GDN-2 recurrence to compress the
-    sequence into a `d_model`-sized conditioning vector, which is then fed
-    to each StableLiquidLN sublayer — the same encode→generate pattern, just
-    with GDN-2 instead of a Perceiver.
+    before LoRA generation. This informed our (now-removed) GDN-2
+    conditioning path: `StableGDNCondLiquidLN` used a GDN-2 recurrence to
+    compress the sequence into a `d_model`-sized conditioning vector, fed to
+    each StableLiquidLN sublayer — the same encode→generate pattern, just
+    with GDN-2 instead of a Perceiver. See
+    [Removed architectures](#removed-architectures).
     **What we did not take:** Their specific Perceiver architecture; GDN-2's
     stateful recurrence serves the same role with the added benefit of
     causal/chunk processing.
@@ -1182,11 +1193,11 @@ taken and what was not.
 | --------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Hypernetwork generates low-rank factors | Ha (2016), Mahabadi (2021)          | Every LLU variant                                                                                                       |
 | Input-conditioned dynamic generation    | von Oswald (2020), Phang (2023)     | `cond` port on all variants                                                                                             |
-| Factorised A/B generation               | Zhyper (2025), Text-to-LoRA (2025)  | `FactorizedLiquidLN`, `StableLiquidLN(factorized=True)`, `FactorizedBatchMomentumLiquidLN`, `FactorizedGDNCondLiquidLN` |
+| Factorised A/B generation               | Zhyper (2025), Text-to-LoRA (2025)  | `FactorizedLiquidLN`, `StableLiquidLN(factorized=True)`                                                                |
 | Factorised hyperfan init                | Zhyper (2025)                       | `utils._factorized_hyperfan_init()`                                                                                     |
 | Cross-attention factor refinement       | SHINE (2026), HyperPrompt (2022)    | `CrossAttnLoraLN`                                                                                                       |
 | LoRA alpha scaling                      | LatentSkill (2026)                  | `lora_alpha` on `StableLiquidLN`, `FactorizedLiquidLN`, `CrossAttnLoraLN`                                               |
-| GDN-2 as stateful conditioner           | Doc-to-LoRA (2026) pattern          | `StableGDNCondLiquidLN`, `FactorizedGDNCondLiquidLN`                                                                    |
+| Engram-hashed LoRA retrieval            | (original to this project)          | `EngramRetrievedLoraLN`                                                                                                 |
+| GDN-2 as stateful conditioner           | Doc-to-LoRA (2026) pattern          | removed (see Removed architectures); `GDNLiquidLN` keeps GDN-2 as an FFN                                                 |
 | Zero-init identity at step 1            | HypeLoRA (2026) calibration insight | All variants                                                                                                            |
 | Dual LoRA/SVD parameterization          | (original to this project)          | `parameterization` flag on most variants                                                                                |
-| Momentum/EMA factor smoothing           | (original to this project)          | `SharedMomentumLiquidLN`, `BatchMomentumLiquidLN`, `FactorizedBatchMomentumLiquidLN`, `MomentumGDNLiquidLN`             |

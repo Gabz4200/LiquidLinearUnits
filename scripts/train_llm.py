@@ -11,9 +11,9 @@ Compares two architectures at a *shared* parameter budget:
 The intermediary MLP is configurable: it can be any LLN in ``LLN_REGISTRY``
 (see ``llu/models/liquid_llm.py``). By default the benchmark runs the full
 comparison -- ``baseline`` plus ``ours`` built with each intermediary LLN
-(``StableLiquidLN``, ``CrossAttnLoraLN``, ``SharedMomentumLiquidLN``,
-``BatchMomentumLiquidLN``) -- so the novel ``CrossAttnLoraLN`` is measured
-against the other sequence-mixer options. Use ``--single`` to train just one
+(``StableLiquidLN``, ``CrossAttnLoraLN``, ``EngramRetrievedLoraLN``) -- so the
+novel ``CrossAttnLoraLN`` / ``EngramRetrievedLoraLN`` are measured against the
+other sequence-mixer options. Use ``--single`` to train just one
 ``--variant``/``--lln`` combination.
 
 Evaluation reports the comparison metrics:
@@ -119,12 +119,12 @@ def build_token_buffer(tok, tokens: int, dataset: str, seq_len: int) -> list[int
 
 
 def reset_momentum_buffers(model: torch.nn.Module) -> None:
-    """Zero the persistent momentum buffers of stateful LLUs before eval.
+    """Zero the persistent state buffers of stateful LLUs before eval.
 
-    ``SharedMomentumLiquidLN`` / ``BatchMomentumLiquidLN`` carry ``a_raw`` /
-    ``b_raw`` / ``g_raw`` buffers that accumulate across forward calls. Without
-    a reset, eval metrics would reflect the *last training batch* rather than
-    the trained weights, making the comparison unfair.
+    Stateful LLUs carry ``a_raw`` / ``b_raw`` / ``g_raw`` buffers that
+    accumulate across forward calls. Without a reset, eval metrics would
+    reflect the *last training batch* rather than the trained weights,
+    making the comparison unfair.
     """
     for m in model.modules():
         for name in ("a_raw", "b_raw", "g_raw"):
@@ -493,11 +493,17 @@ def main() -> None:
     )
     p.add_argument(
         "--llns",
-        default="StableLiquidLN,CrossAttnLoraLN,SharedMomentumLiquidLN,BatchMomentumLiquidLN",
+        default="StableLiquidLN,CrossAttnLoraLN,EngramRetrievedLoraLN",
         help="comma-separated LLNs for the comparison loop (baseline always included)",
     )
     p.add_argument(
         "--single", action="store_true", help="run only --variant/--lln (skip the comparison loop)"
+    )
+    p.add_argument(
+        "--num_experts",
+        type=int,
+        default=8,
+        help="number of experts for EngramRetrievedLoraLN (ignored by other archs)",
     )
     p.add_argument(
         "--use_engram", action="store_true", help="Enable DeepSeek Engram conditional memory"

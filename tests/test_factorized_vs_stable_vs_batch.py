@@ -1,13 +1,13 @@
-"""Compare FactorizedLiquidLN, StableLiquidLN, and BatchMomentumLiquidLN.
+"""Compare FactorizedLiquidLN and StableLiquidLN.
 
-Runs equivalent happy-path tests from test_batch_momentum_liquid.py adapted
-for each variant, plus cross-variant numerical comparison on identical inputs.
+Runs equivalent happy-path tests adapted for each variant, plus
+cross-variant numerical comparison on identical inputs.
 """
 
 import pytest
 import torch
 
-from llu.models import BatchMomentumLiquidLN, FactorizedLiquidLN, StableLiquidLN
+from llu.models import FactorizedLiquidLN, StableLiquidLN
 
 IN_FEATURES = 8
 OUT_FEATURES = 4
@@ -19,10 +19,6 @@ SEQ = 3
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
-
-
-def _make_batch_momentum():
-    return BatchMomentumLiquidLN(IN_FEATURES, OUT_FEATURES, rank=RANK, bias=True)
 
 
 def _make_stable_monolithic():
@@ -38,7 +34,6 @@ def _make_factorized():
 
 
 ALL_VARIANTS = {
-    "BatchMomentum": _make_batch_momentum,
     "Stable(mono)": _make_stable_monolithic,
     "Stable(fact)": _make_stable_factorized,
     "Factorized": _make_factorized,
@@ -77,7 +72,7 @@ def test_shapes_1d_and_3d(name, make):
 
 # ===========================================================================
 # 3. ADAPTIVE PATH CHANGES BETWEEN FORWARD PASSES
-#    (BatchMomentum has momentum buffers; others re-generate per call)
+#    (adaptive factors are re-generated per call; no cross-call state)
 # ===========================================================================
 
 
@@ -89,8 +84,7 @@ def test_forward_passes_differ(name, make):
     out1 = model(x)
     out2 = model(x)
     # All variants produce identical outputs on repeated forward with same input
-    # (BatchMomentum's momentum buffer is not used in the forward computation
-    #  of the adaptive path — it only accumulates for diagnostic/training state)
+    # (the adaptive path is stateless across calls for these variants)
     assert torch.allclose(out1, out2, atol=1e-6), (
         f"{name}: repeated forward should produce identical outputs"
     )
@@ -206,8 +200,6 @@ def test_extreme_inputs_no_nan_inf(name, make):
 
 def test_invalid_rank_raises():
     with pytest.raises(ValueError, match="rank must be >= 1"):
-        BatchMomentumLiquidLN(8, 4, rank=0)
-    with pytest.raises(ValueError, match="rank must be >= 1"):
         StableLiquidLN(8, 4, rank=0)
     with pytest.raises(ValueError, match="rank must be >= 1"):
         FactorizedLiquidLN(8, 4, rank=0)
@@ -238,7 +230,7 @@ def test_cross_variant_outputs_finite_and_distinct():
 
     # At init, all variants produce identical outputs (B-factors zeroed → adaptive=0)
     for name, out in outputs.items():
-        assert torch.allclose(out, outputs["BatchMomentum"], atol=1e-5), (
+        assert torch.allclose(out, outputs["Stable(mono)"], atol=1e-5), (
             f"{name}: should match at init (all B-factors zeroed)"
         )
 
@@ -264,9 +256,7 @@ def test_cross_variant_outputs_finite_and_distinct():
         "Stable(fact) and Factorized should match after training (same arch)"
     )
 
-    # BatchMomentum == Stable(mono) (same hypernet, but momentum adds a difference)
-    # Both use monolithic hypernetwork; BatchMomentum additionally applies momentum
-    # Factorized should differ from both monolithic variants
+    # Factorized should differ from the monolithic variant
     assert not torch.allclose(trained["Factorized"], trained["Stable(mono)"], atol=1e-3), (
         "Factorized and Stable(mono) should diverge after training"
     )

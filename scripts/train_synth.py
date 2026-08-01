@@ -254,6 +254,12 @@ def parse_args() -> dict:
         default=2,
         help="cross-attn heads for CrossAttnLoraLN (ignored by other archs)",
     )
+    p.add_argument(
+        "--num_experts",
+        type=int,
+        default=8,
+        help="number of experts for EngramRetrievedLoraLN (ignored by other archs)",
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--steps", type=int, default=300)
     p.add_argument("--batch", type=int, default=32)

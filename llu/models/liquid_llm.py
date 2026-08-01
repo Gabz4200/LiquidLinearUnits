@@ -35,11 +35,9 @@ from torch import nn
 from .engram import Engram, EngramConfig
 from .gdn2 import GatedDeltaNet2
 from .llns import (
-    BatchMomentumLiquidLN,
     CrossAttnLoraLN,
-    FactorizedBatchMomentumLiquidLN,
+    EngramRetrievedLoraLN,
     FactorizedLiquidLN,
-    SharedMomentumLiquidLN,
     StableLiquidLN,
 )
 
@@ -48,27 +46,23 @@ from .llns import (
 # separate ``cond`` tensor (the GDN-2 conditioning stream) and is parameterised
 # by ``rank`` / ``parameterization`` so it can run as a learned low-rank update:
 #
-# * ``StableLiquidLN``                  -- input-adaptive hypernetwork factors (monolithic).
-# * ``CrossAttnLoraLN``                 -- LoRA-style factors refined by cross-attention over
-#                                           the ``cond`` sequence.
-# * ``SharedMomentumLiquidLN``          -- factors with a shared EMA momentum over the batch.
-# * ``BatchMomentumLiquidLN``           -- factors with a per-batch-element momentum.
-# * ``FactorizedLiquidLN``              -- factorized A/B generation (two separate projections).
-# * ``FactorizedBatchMomentumLiquidLN`` -- factorized A/B generation + per-batch-element momentum.
+# * ``StableLiquidLN``        -- input-adaptive hypernetwork factors (monolithic).
+# * ``CrossAttnLoraLN``       -- LoRA-style factors refined by cross-attention over
+#                                 the ``cond`` sequence.
+# * ``EngramRetrievedLoraLN`` -- Engram-retrieved LoRA expert bank modulated by a
+#                                 sequence-conditioned diagonal gate.
+# * ``FactorizedLiquidLN``    -- factorized A/B generation (two separate projections).
 #
 # ``RankRLiquidLN`` is deliberately excluded: it has no ``cond`` port, so it
-# cannot act as the intermediary. The two GDN-2 LLUs (``GDNLiquidLN`` /
-# ``MomentumGDNLiquidLN``) are also excluded because the ``ours`` block already
-# produces ``cond`` via a GDN-2 recurrence -- stacking a second GDN-2 inside the
-# intermediary would be redundant and ~5x slower/step. ``LiquidLinear`` and
-# ``Rank1LiquidLN`` are excluded for the same reason (no ``cond`` port).
+# cannot act as the intermediary. The GDN-2 LLU (``GDNLiquidLN``) is also
+# excluded because the ``ours`` block already produces ``cond`` via a GDN-2
+# recurrence -- stacking a second GDN-2 inside the intermediary would be
+# redundant and ~5x slower/step.
 LLN_REGISTRY = {
     "StableLiquidLN": StableLiquidLN,
     "CrossAttnLoraLN": CrossAttnLoraLN,
-    "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
-    "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
+    "EngramRetrievedLoraLN": EngramRetrievedLoraLN,
     "FactorizedLiquidLN": FactorizedLiquidLN,
-    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
 }
 
 
@@ -85,6 +79,7 @@ def _lln_kwargs_for(
     decay_rate: float = 0.4,
     learnable_decay_rate: bool = False,
     lora_alpha: float = 1.0,
+    num_experts: int = 8,
 ) -> dict:
     """Forward only the kwargs ``cls.__init__`` accepts.
 
@@ -105,6 +100,7 @@ def _lln_kwargs_for(
         decay_rate=decay_rate,
         learnable_decay_rate=learnable_decay_rate,
         lora_alpha=lora_alpha,
+        num_experts=num_experts,
     )
     return {k: v for k, v in cand.items() if k in params}
 
@@ -121,10 +117,11 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.inv_freq: torch.Tensor
 
     def forward(self, seq_len: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(t, self.inv_freq)  # (T, dim/2)
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq.to(torch.float32))  # (T, dim/2)
         emb = torch.cat((freqs, freqs), dim=-1)  # (T, dim)
         return emb.cos(), emb.sin()
 

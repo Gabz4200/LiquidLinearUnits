@@ -31,7 +31,6 @@ from torch import nn
 
 from .base import BaseLLU
 from .utils import (
-    DEVICE,
     _activate,
     _ensure_3d,
     _small_init,
@@ -132,7 +131,6 @@ class CrossAttnLoraLN(BaseLLU):
             device=device,
             dtype=dtype,
         )
-        dev = device if device is not None else DEVICE
 
         self.rank = rank
         self.normalize_input = normalize_input
@@ -151,21 +149,21 @@ class CrossAttnLoraLN(BaseLLU):
         # --- The two learned low-rank factor matrices (LoRA-style). ---
         # mat_o lives in the out_features space (A in lora, U in svd);
         # mat_i lives in the in_features space (B in lora, V in svd).
-        self.mat_o = nn.Parameter(torch.empty(self.rank, out_features, device=dev, dtype=dtype))
-        self.mat_i = nn.Parameter(torch.empty(self.rank, in_features, device=dev, dtype=dtype))
+        self.mat_o = nn.Parameter(torch.empty(self.rank, out_features, device=device, dtype=dtype))
+        self.mat_i = nn.Parameter(torch.empty(self.rank, in_features, device=device, dtype=dtype))
 
         # --- Cross-attention refiner. ---
         # Project the two factor matrices into the shared attention space to
         # form the target query tokens (split back after the decoder).
-        self.w_qo = nn.Linear(out_features, attn_dim, bias=False, device=dev, dtype=dtype)
-        self.w_qi = nn.Linear(in_features, attn_dim, bias=False, device=dev, dtype=dtype)
+        self.w_qo = nn.Linear(out_features, attn_dim, bias=False, device=device, dtype=dtype)
+        self.w_qi = nn.Linear(in_features, attn_dim, bias=False, device=device, dtype=dtype)
         # Project the source sequence (cond) into the attention space to form
         # the cross-attention keys and values.
-        self.src_proj = nn.Linear(self.cond_dim, attn_dim, bias=False, device=dev, dtype=dtype)
+        self.src_proj = nn.Linear(self.cond_dim, attn_dim, bias=False, device=device, dtype=dtype)
         # Residual readouts back into each factor's native space. Zero-initialised
         # so they add nothing at step 1 (adaptive path stays zero).
-        self.w_o = nn.Linear(attn_dim, out_features, bias=True, device=dev, dtype=dtype)
-        self.w_i = nn.Linear(attn_dim, in_features, bias=True, device=dev, dtype=dtype)
+        self.w_o = nn.Linear(attn_dim, out_features, bias=True, device=device, dtype=dtype)
+        self.w_i = nn.Linear(attn_dim, in_features, bias=True, device=device, dtype=dtype)
 
         act = {"silu": nn.SiLU, "gelu": nn.GELU}[attn_activation]
         self.decoder = nn.TransformerDecoderLayer(
@@ -183,17 +181,17 @@ class CrossAttnLoraLN(BaseLLU):
         # adaptive path is still zero at step 1 (because mat_i is zero) while
         # gradient flow into mat_i is preserved through this non-zero scale.
         if self.parameterization == "svd":
-            self.g = nn.Parameter(torch.ones(self.rank, device=dev, dtype=dtype))
+            self.g = nn.Parameter(torch.ones(self.rank, device=device, dtype=dtype))
         else:
             self.g = None
 
         # --- Optional dynamic bias (driven by cond). ---
         hidden = max(self.cond_dim // 4, rank * 16)
-        self.bias_dynamic: nn.Sequential | None = (
+        self.bias_dynamic = (
             nn.Sequential(
-                nn.Linear(self.cond_dim, hidden, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden, out_features, device=dev, dtype=dtype),
+                nn.Linear(hidden, out_features, device=device, dtype=dtype),
             )
             if dynamic_bias
             else None

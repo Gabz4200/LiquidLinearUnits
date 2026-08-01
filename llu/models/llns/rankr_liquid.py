@@ -7,7 +7,6 @@ from torch import nn
 
 from .base import BaseLLU
 from .utils import (
-    DEVICE,
     _activate,
     _validate_parameterization,
 )
@@ -85,7 +84,7 @@ class RankRLiquidLN(BaseLLU):
             device=device,
             dtype=dtype,
         )
-        dev = device if device is not None else DEVICE
+        dev = device if device is not None else torch.device("cpu")
 
         self.rank = rank
         self.normalize_input = normalize_input
@@ -109,11 +108,10 @@ class RankRLiquidLN(BaseLLU):
         if self.parameterization == "svd":
             self._create_svd_factors(dev, dtype)
 
-        self.bias_dynamic: nn.Linear | None = (
-            nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
-            if dynamic_bias
-            else None
-        )
+        if dynamic_bias:
+            self.bias_dynamic = nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
+        else:
+            self.bias_dynamic = None
 
         self._init_weights()
 

@@ -36,9 +36,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .llns import (
-    BatchMomentumLiquidLN,
     RankRLiquidLN,
-    SharedMomentumLiquidLN,
     StableLiquidLN,
 )
 
@@ -46,8 +44,6 @@ from .llns import (
 GRAPH_LLN_REGISTRY = {
     "StableLiquidLN": StableLiquidLN,
     "RankRLiquidLN": RankRLiquidLN,
-    "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
-    "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
 }
 
 

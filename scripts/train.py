@@ -10,7 +10,7 @@ Usage
 -----
     python scripts/train.py                      # full matrix (slow on CPU)
     python scripts/train.py --quick              # tiny smoke configuration
-    python scripts/train.py --tasks overwrite_recall --archs SharedMomentumLiquidLN
+    python scripts/train.py --tasks overwrite_recall --archs StableLiquidLN
     python scripts/train.py --no-sweeps          # one config per task, no sweeps
 
 All sequences are generated on the fly (no downloads). Every run is fully

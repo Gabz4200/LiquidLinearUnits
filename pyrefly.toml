@@ -34,7 +34,7 @@ ignore-missing-imports = [
     "llama_cpp.*",
 ]
 
-search-path = ["llu"]
+search-path = ["llu", "."]
 
 [errors]
 # Turn off noisy checks common in research/experimental code

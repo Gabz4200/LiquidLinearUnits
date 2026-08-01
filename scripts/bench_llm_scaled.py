@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-r"""Scaled LLM benchmark: top 3 intermediary LLNs at n_embd=192, 4 layers.
+r"""Scaled LLM benchmark: top 4 intermediary LLNs at n_embd=192, 4 layers.
 
 Tests the best-performing SVD configs from the tiny-screen at a larger scale
 where the LLU intermediary's inductive bias is more visible (shifting ~3M params
@@ -340,14 +340,13 @@ def main():
     data = PackedTokens(ids, a.seq_len)
     loader = DataLoader(data, batch_size=a.batch, shuffle=True, drop_last=True)
 
-    # Top 3 SVD configs from tiny screen + baseline
+    # Top 4 SVD configs from tiny screen + baseline
     configs = [
         ("baseline", None, "svd"),
-        ("ours", "FactorizedBatchMomentumLiquidLN", "svd"),
-        ("ours", "SharedMomentumLiquidLN", "svd"),
         ("ours", "FactorizedLiquidLN", "svd"),
         ("ours", "CrossAttnLoraLN", "svd"),
         ("ours", "StableLiquidLN", "svd"),
+        ("ours", "EngramRetrievedLoraLN", "svd"),
     ]
 
     print(f"\n[plan] {len(configs)} runs at scaled config (n_embd=192, 4 layers)")

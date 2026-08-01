@@ -21,44 +21,46 @@ def _get_cached_lookup_table(
                 trust_remote_code=True,
                 local_files_only=True,
             )
-            sentinel = "\ue000"
-            normalizer = normalizers.Sequence(
-                [
-                    normalizers.NFKC(),
-                    normalizers.NFD(),
-                    normalizers.StripAccents(),
-                    normalizers.Lowercase(),
-                    normalizers.Replace(Regex(r"[ \t\r\n]+"), " "),
-                    normalizers.Replace(Regex(r"^ $"), sentinel),
-                    normalizers.Strip(),
-                    normalizers.Replace(sentinel, " "),
-                ]
-            )
-            old2new: dict[int, int] = {}
-            key2new: dict[str, int] = {}
-            new_tokens: list[str] = []
+            if tokenizer is not None:
+                sentinel = "\ue000"
+                normalizer = normalizers.Sequence(
+                    [
+                        normalizers.NFKC(),
+                        normalizers.NFD(),
+                        normalizers.StripAccents(),
+                        normalizers.Lowercase(),
+                        normalizers.Replace(Regex(r"[ \t\r\n]+"), " "),
+                        normalizers.Replace(Regex(r"^ $"), sentinel),
+                        normalizers.Strip(),
+                        normalizers.Replace(sentinel, " "),
+                    ]
+                )
+                old2new: dict[int, int] = {}
+                key2new: dict[str, int] = {}
+                new_tokens: list[str] = []
 
-            tok_vocab_size = len(tokenizer)
-            for tid in range(tok_vocab_size):
-                text = tokenizer.decode([tid], skip_special_tokens=False)
-                if "\ufffd" in text:
-                    key = tokenizer.convert_ids_to_tokens(tid)
-                else:
-                    norm = normalizer.normalize_str(text)
-                    key = norm if norm else text
+                tok_vocab_size = len(tokenizer)
+                for tid in range(tok_vocab_size):
+                    text = tokenizer.decode([tid], skip_special_tokens=False)
+                    if "\ufffd" in text:
+                        raw_key = tokenizer.convert_ids_to_tokens(tid)
+                        key: str = raw_key[0] if isinstance(raw_key, list) else str(raw_key)
+                    else:
+                        norm = normalizer.normalize_str(text)
+                        key = norm if norm else text
 
-                nid = key2new.get(key)
-                if nid is None:
-                    nid = len(new_tokens)
-                    key2new[key] = nid
-                    new_tokens.append(key)
-                old2new[tid] = nid
+                    nid = key2new.get(key)
+                    if nid is None:
+                        nid = len(new_tokens)
+                        key2new[key] = nid
+                        new_tokens.append(key)
+                    old2new[tid] = nid
 
-            lookup = np.empty(tok_vocab_size, dtype=np.int64)
-            for tid in range(tok_vocab_size):
-                lookup[tid] = old2new[tid]
+                lookup = np.empty(tok_vocab_size, dtype=np.int64)
+                for tid in range(tok_vocab_size):
+                    lookup[tid] = old2new[tid]
 
-            return lookup, len(new_tokens)
+                return lookup, len(new_tokens)
         except (ImportError, OSError, ValueError, KeyError, AttributeError):
             pass
 

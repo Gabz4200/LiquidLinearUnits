@@ -13,13 +13,12 @@ Design notes / deliberate choices (see project discussion):
 * **GDN-2 is used only in FFN positions.** It was designed as an FFN-style
   sequence mixer and is a poor fit for the query/key/value *projection*
   matrices (which should map a single token deterministically). For the GDN
-  families the Q/K/V/O projections use the non-GDN counterpart of the same
-  family (``StableLiquidLN`` for ``GDNLiquidLN``, ``SharedMomentumLiquidLN``
-  for ``MomentumGDNLiquidLN``); the FFN uses the GDN-2 unit.
+  family the Q/K/V/O projections use ``StableLiquidLN``; the FFN uses the
+  GDN-2 unit.
 * The model is run **token-by-token (autoregressive)** so that the recurrent
   state of every LLU variant evolves correctly over time: GDN-2 threads its
-  ``past_key_values`` cache, and the momentum units update their buffers step
-  by step. A rolling KV cache supplies the sliding-window attention context.
+  ``past_key_values`` cache step by step. A rolling KV cache supplies the
+  sliding-window attention context.
 * The readout head is a per-position ``StableLiquidLN`` (neutral, no cross-step
   recurrence) so it does not bias the architecture comparison.
 """
@@ -36,16 +35,11 @@ from torch import nn
 
 from .engram import Engram, EngramConfig
 from .llns import (
-    BatchMomentumLiquidLN,
     CrossAttnLoraLN,
-    FactorizedBatchMomentumLiquidLN,
+    EngramRetrievedLoraLN,
     FactorizedLiquidLN,
     GDNLiquidLN,
-    LiquidLinear,
-    MomentumGDNLiquidLN,
-    Rank1LiquidLN,
     RankRLiquidLN,
-    SharedMomentumLiquidLN,
     StableLiquidLN,
 )
 
@@ -54,47 +48,30 @@ from .llns import (
 # ---------------------------------------------------------------------------
 
 ARCH_FACTORIES = {
-    "LiquidLinear": LiquidLinear,
-    "Rank1LiquidLN": Rank1LiquidLN,
     "RankRLiquidLN": RankRLiquidLN,
     "StableLiquidLN": StableLiquidLN,
     "FactorizedLiquidLN": FactorizedLiquidLN,
-    "SharedMomentumLiquidLN": SharedMomentumLiquidLN,
-    "BatchMomentumLiquidLN": BatchMomentumLiquidLN,
-    "FactorizedBatchMomentumLiquidLN": FactorizedBatchMomentumLiquidLN,
     "GDNLiquidLN": GDNLiquidLN,
-    "MomentumGDNLiquidLN": MomentumGDNLiquidLN,
-    "StableGDNCondLiquidLN": StableLiquidLN,
-    "FactorizedGDNCondLiquidLN": FactorizedLiquidLN,
-    "FactorizedBatchMomentumGDNCondLiquidLN": FactorizedBatchMomentumLiquidLN,
     "CrossAttnLoraLN": CrossAttnLoraLN,
+    "EngramRetrievedLoraLN": EngramRetrievedLoraLN,
 }
 
 # GDN-2 units: suitable for FFN positions, not for projection matrices.
-_GDN_LAYERS = (GDNLiquidLN, MomentumGDNLiquidLN)
+_GDN_LAYERS = (GDNLiquidLN,)
 # Units whose forward accepts an explicit `cond` argument.
 _COND_LAYERS = (
     StableLiquidLN,
     FactorizedLiquidLN,
-    SharedMomentumLiquidLN,
-    BatchMomentumLiquidLN,
-    FactorizedBatchMomentumLiquidLN,
     GDNLiquidLN,
-    MomentumGDNLiquidLN,
     CrossAttnLoraLN,
+    EngramRetrievedLoraLN,
 )
 
-# Architectures that carry cross-step recurrence (delta-rule memory or momentum
-# buffers), so they can "see the whole sequence" without attention. These are
-# the ones that admit a meaningful attention-free ablation.
+# Architectures that carry cross-step recurrence (delta-rule memory), so they
+# can "see the whole sequence" without attention. These are the ones that
+# admit a meaningful attention-free ablation.
 RECURRENT_ARCHS = {
     "GDNLiquidLN",
-    "MomentumGDNLiquidLN",
-    "SharedMomentumLiquidLN",
-    "BatchMomentumLiquidLN",
-    "StableGDNCondLiquidLN",
-    "FactorizedGDNCondLiquidLN",
-    "FactorizedBatchMomentumGDNCondLiquidLN",
 }
 
 
@@ -115,14 +92,6 @@ def _arch_map(arch: str) -> tuple[str, str]:
     """
     if arch == "GDNLiquidLN":
         return ("StableLiquidLN", "GDNLiquidLN")
-    if arch == "MomentumGDNLiquidLN":
-        return ("SharedMomentumLiquidLN", "MomentumGDNLiquidLN")
-    if arch == "StableGDNCondLiquidLN":
-        return ("StableLiquidLN", "StableLiquidLN")
-    if arch == "FactorizedGDNCondLiquidLN":
-        return ("FactorizedLiquidLN", "FactorizedLiquidLN")
-    if arch == "FactorizedBatchMomentumGDNCondLiquidLN":
-        return ("FactorizedBatchMomentumLiquidLN", "FactorizedBatchMomentumLiquidLN")
     return (arch, arch)
 
 
@@ -137,6 +106,7 @@ def _llu_kwargs_for(
     parameterization: str = "lora",
     attn_dim: int = 32,
     attn_heads: int = 2,
+    num_experts: int = 8,
 ) -> dict:
     """Build a kwargs dict containing only the params ``cls.__init__`` accepts.
 
@@ -149,6 +119,8 @@ def _llu_kwargs_for(
     kw: dict = {}
     if "rank" in params:
         kw["rank"] = rank
+    if "num_experts" in params:
+        kw["num_experts"] = num_experts
     if "decay_rate" in params:
         kw["decay_rate"] = decay_rate
     if "initial_decay_rate" in params:
@@ -222,12 +194,10 @@ def _reset_llu(llu: nn.Module) -> None:
     to the next one -- otherwise training loops raise "backward through the
     graph a second time".
     """
-    if hasattr(llu, "a_raw") and llu.a_raw is not None:
-        llu.a_raw = torch.zeros_like(llu.a_raw)
-    if hasattr(llu, "b_raw") and llu.b_raw is not None:
-        llu.b_raw = torch.zeros_like(llu.b_raw)
-    if hasattr(llu, "g_raw") and llu.g_raw is not None:
-        llu.g_raw = torch.zeros_like(llu.g_raw)
+    for attr in ("a_raw", "b_raw", "g_raw"):
+        val = getattr(llu, attr, None)
+        if isinstance(val, torch.Tensor):
+            setattr(llu, attr, torch.zeros_like(val))
 
 
 class RMSNorm(nn.Module):
@@ -463,6 +433,7 @@ class LiquidTransformer(nn.Module):
         parameterization: str = "lora",
         lln_attn_dim: int = 32,
         lln_attn_heads: int = 2,
+        num_experts: int = 8,
         use_engram: bool = False,
         engram_mode: str = "cond",
         engram_layer_ids: list[int] | None = None,
@@ -490,6 +461,7 @@ class LiquidTransformer(nn.Module):
             parameterization=parameterization,
             attn_dim=lln_attn_dim,
             attn_heads=lln_attn_heads,
+            num_experts=num_experts,
         )
         ffn_kwargs = _llu_kwargs_for(
             ffn_cls,
@@ -501,35 +473,13 @@ class LiquidTransformer(nn.Module):
             parameterization=parameterization,
             attn_dim=lln_attn_dim,
             attn_heads=lln_attn_heads,
+            num_experts=num_experts,
         )
 
-        # Optional GDN-2 cond provider (feeds `cond` to the StableLiquidLN FFN).
-        # Its output is d_model-sized, so the FFN sublayers condition on a
-        # `cond_dim=d_model` vector independent of their own in_features.
-        cond_llu = (
-            GDNLiquidLN
-            if arch
-            in (
-                "StableGDNCondLiquidLN",
-                "FactorizedGDNCondLiquidLN",
-                "FactorizedBatchMomentumGDNCondLiquidLN",
-            )
-            else None
-        )
-        if cond_llu is not None:
-            ffn_kwargs = dict(ffn_kwargs)
-            ffn_kwargs["cond_dim"] = d_model
-            cond_kwargs = _llu_kwargs_for(
-                GDNLiquidLN,
-                rank=1,
-                decay_rate=decay_rate,
-                head_dim=8,
-                num_heads=2,
-                learnable_decay=learnable_decay,
-                parameterization=parameterization,
-            )
-        else:
-            cond_kwargs = None
+        # GDN-2 cond provider architectures were pruned; FFN conditioning
+        # inputs (Engram, explicit `cond`) are wired directly by callers.
+        cond_llu = None
+        cond_kwargs = None
 
         self.use_engram = use_engram
         self.engram_mode = engram_mode
@@ -567,6 +517,7 @@ class LiquidTransformer(nn.Module):
 
     def reset_state(self) -> None:
         for block in self.blocks:
+            assert isinstance(block, LiquidTransformerBlock)
             block.reset()
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -588,6 +539,7 @@ class LiquidTransformer(nn.Module):
             h = x[:, t]
             ids_t = input_ids[:, : t + 1] if input_ids is not None else None
             for idx, block in enumerate(self.blocks):
+                assert isinstance(block, LiquidTransformerBlock)
                 if idx in engram_cache:
                     e_out, e_cond = engram_cache[idx]
                     h = block.step(h, engram_out=e_out[:, t], engram_cond=e_cond[:, t])
@@ -628,6 +580,7 @@ def build_model(arch: str, d_model: int, out_dim: int, **overrides: Any) -> Liqu
         parameterization="lora",
         lln_attn_dim=32,
         lln_attn_heads=2,
+        num_experts=8,
         use_engram=overrides.pop("use_engram", False),
         engram_mode=overrides.pop("engram_mode", "cond"),
         engram_layer_ids=overrides.pop("engram_layer_ids", None),
@@ -642,6 +595,7 @@ def build_model(arch: str, d_model: int, out_dim: int, **overrides: Any) -> Liqu
 __all__ = [
     "ARCH_FACTORIES",
     "RECURRENT_ARCHS",
+    "EngramRetrievedLoraLN",
     "LiquidTransformer",
     "LiquidTransformerBlock",
     "RMSNorm",

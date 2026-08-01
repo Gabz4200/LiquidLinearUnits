@@ -13,7 +13,6 @@ from torch import nn
 
 from .base import BaseLLU
 from .utils import (
-    DEVICE,
     _activate,
     _factorized_hyperfan_init,
     _small_init,
@@ -91,8 +90,6 @@ class FactorizedLiquidLN(BaseLLU):
             device=device,
             dtype=dtype,
         )
-        dev = device if device is not None else DEVICE
-
         self.rank = rank
         self.normalize_input = normalize_input
         self.cond_dim = cond_dim if cond_dim is not None else in_features
@@ -103,29 +100,29 @@ class FactorizedLiquidLN(BaseLLU):
 
         if self.parameterization == "lora":
             self.proj_a = nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, rank * out_features, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, rank * out_features, device=device, dtype=dtype),
             )
             self.proj_b = nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, rank * in_features, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, rank * in_features, device=device, dtype=dtype),
             )
         else:
             self.proj_a = nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, rank, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, rank, device=device, dtype=dtype),
             )
             self.proj_b = None
-            self._create_svd_factors(dev, dtype)
+            self._create_svd_factors(device, dtype)
 
-        self.bias_dynamic: nn.Module | None = (
+        self.bias_dynamic = (
             nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, out_features, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, out_features, device=device, dtype=dtype),
             )
             if dynamic_bias
             else None
@@ -144,10 +141,11 @@ class FactorizedLiquidLN(BaseLLU):
             )
             # Zero the B-factors so adaptive path is zero at step 1.
             last_b = self.proj_b[-1] if isinstance(self.proj_b, nn.Sequential) else self.proj_b
-            with torch.no_grad():
-                last_b.weight.data.zero_()
-                if last_b.bias is not None:
-                    last_b.bias.data.zero_()
+            if isinstance(last_b, nn.Linear):
+                with torch.no_grad():
+                    last_b.weight.data.zero_()
+                    if last_b.bias is not None:
+                        last_b.bias.data.zero_()
         else:
             self._init_svd_projection(self.proj_a)
         if self.bias_dynamic is not None:

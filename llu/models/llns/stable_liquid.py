@@ -7,7 +7,6 @@ from torch import nn
 
 from .base import BaseLLU
 from .utils import (
-    DEVICE,
     _activate,
     _factorized_hyperfan_init,
     _validate_parameterization,
@@ -98,8 +97,6 @@ class StableLiquidLN(BaseLLU):
             device=device,
             dtype=dtype,
         )
-        dev = device if device is not None else DEVICE
-
         self.rank = rank
         self.normalize_input = normalize_input
         self.cond_dim = cond_dim if cond_dim is not None else in_features
@@ -112,51 +109,51 @@ class StableLiquidLN(BaseLLU):
         if self.parameterization == "lora":
             if factorized:
                 self.proj_a = nn.Sequential(
-                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                     nn.SiLU(),
-                    nn.Linear(hidden_dim, rank * out_features, device=dev, dtype=dtype),
+                    nn.Linear(hidden_dim, rank * out_features, device=device, dtype=dtype),
                 )
                 self.proj_b = nn.Sequential(
-                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                     nn.SiLU(),
-                    nn.Linear(hidden_dim, rank * in_features, device=dev, dtype=dtype),
+                    nn.Linear(hidden_dim, rank * in_features, device=device, dtype=dtype),
                 )
                 self.hypernetwork = None
             else:
                 self.hypernetwork = nn.Sequential(
-                    nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                    nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                     nn.SiLU(),
                     nn.Linear(
-                        hidden_dim, rank * (out_features + in_features), device=dev, dtype=dtype
+                        hidden_dim, rank * (out_features + in_features), device=device, dtype=dtype
                     ),
                 )
                 self.proj_a = None
                 self.proj_b = None
         else:
             self.hypernetwork = nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, rank, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, rank, device=device, dtype=dtype),
             )
             self.proj_a = None
             self.proj_b = None
-            self._create_svd_factors(dev, dtype)
+            self._create_svd_factors(device, dtype)
 
-        self.bias_dynamic: nn.Module | None = (
-            nn.Sequential(
-                nn.Linear(self.cond_dim, hidden_dim, device=dev, dtype=dtype),
+        if dynamic_bias:
+            self.bias_dynamic = nn.Sequential(
+                nn.Linear(self.cond_dim, hidden_dim, device=device, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, out_features, device=dev, dtype=dtype),
+                nn.Linear(hidden_dim, out_features, device=device, dtype=dtype),
             )
-            if dynamic_bias
-            else None
-        )
+        else:
+            self.bias_dynamic = None
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         if self.parameterization == "lora":
             if self.factorized:
+                assert self.proj_a is not None and self.proj_b is not None
                 _factorized_hyperfan_init(
                     self.proj_a,
                     self.proj_b,
@@ -165,15 +162,18 @@ class StableLiquidLN(BaseLLU):
                     self.rank,
                 )
                 last_b = self.proj_b[-1] if isinstance(self.proj_b, nn.Sequential) else self.proj_b
-                with torch.no_grad():
-                    last_b.weight.data.zero_()
-                    if last_b.bias is not None:
-                        last_b.bias.data.zero_()
+                if isinstance(last_b, nn.Linear):
+                    with torch.no_grad():
+                        last_b.weight.data.zero_()
+                        if last_b.bias is not None:
+                            last_b.bias.data.zero_()
             else:
+                assert self.hypernetwork is not None
                 self._init_low_rank_adaptive(
                     self.hypernetwork, self.rank * self.out_features, rank=self.rank
                 )
         else:
+            assert self.hypernetwork is not None
             self._init_svd_projection(self.hypernetwork)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
@@ -184,9 +184,11 @@ class StableLiquidLN(BaseLLU):
 
         if self.parameterization == "lora":
             if self.factorized:
+                assert self.proj_a is not None and self.proj_b is not None
                 a_raw = self.proj_a(h_in).reshape(*h_in.shape[:-1], self.rank, self.out_features)
                 b_raw = self.proj_b(h_in).reshape(*h_in.shape[:-1], self.rank, self.in_features)
             else:
+                assert self.hypernetwork is not None
                 raw = self.hypernetwork(h_in)
                 split = self.rank * self.out_features
                 a_raw = raw[..., :split].reshape(*h_in.shape[:-1], self.rank, self.out_features)
@@ -196,6 +198,7 @@ class StableLiquidLN(BaseLLU):
             b = _activate(b_raw, self.factor_activation)
             adaptive = self._compute_low_rank_adaptive(a, b, x)
         else:
+            assert self.hypernetwork is not None
             g_raw = self.hypernetwork(h_in)
             g = _activate(g_raw, self.factor_activation)
             adaptive = self._compute_svd_adaptive(x, g)

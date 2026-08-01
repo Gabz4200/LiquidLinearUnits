@@ -8,7 +8,10 @@ import os
 import sys
 import warnings
 
+from typing import Any
+
 import torch
+from torch import nn
 
 __all__ = ["GatedDeltaNet2"]
 
@@ -41,7 +44,7 @@ def _warn_gpu_fallback(exc: Exception) -> None:
     )
 
 
-def _make_gated_delta_net2(*args: object, **kwargs: object) -> object:
+def _make_gated_delta_net2(*args: Any, **kwargs: Any) -> nn.Module:
     """Construct a GDN-2 layer, selecting the GPU backend when available.
 
     The GPU-optimized ``fla``/Triton implementation is used only when all of:

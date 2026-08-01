@@ -7,7 +7,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+#: Default device for LLU layers when no explicit device is passed.
+#: Using ``CPU`` avoids a hidden import cycle between modules and keeps
+#: the CPU-only research runtime self-consistent.
+DEVICE: torch.device = torch.device("cpu")
 
 _VALID_ACTIVATIONS = frozenset({"tanh", "norm", "rmsnorm", "none"})
 _VALID_PARAMETERIZATIONS = frozenset({"lora", "svd"})
@@ -236,21 +239,6 @@ def _init_hypernetwork(
         _small_init(hypernetwork)
 
 
-def _ensure_buffer_shape(buffer: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    r"""_ensure_buffer_shape(buffer, target) -> Tensor
-
-    Return a zeroed tensor with the same shape, device, and dtype as target
-    if buffer does not match, otherwise return buffer.
-    """
-    if (
-        buffer.shape != target.shape
-        or buffer.device != target.device
-        or buffer.dtype != target.dtype
-    ):
-        return torch.zeros_like(target)
-    return buffer
-
-
 def _ensure_3d(t: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     r"""_ensure_3d(t) -> (t_3d, lead_shape)
 
@@ -282,7 +270,7 @@ def _run_gdn2_to_factors(
     attention_mask: torch.Tensor | None,
     past_key_values: Any | None,
     use_cache: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+) -> tuple[torch.Size, torch.Tensor, torch.Tensor, Any]:
     r"""_run_gdn2_to_factors(gdn2, h_in, proj_out, *, rank, in_features, out_features, parameterization, attention_mask, past_key_values, use_cache) -> (orig_shape, gdn_out, raw, past_key_values)
 
     Run a GDN-2 block on *h_in* and project its output to dynamic factors.
@@ -400,6 +388,19 @@ class _FreezeMixin:
     """
 
     linear_core: nn.Linear
+
+    def freeze(self, mode: str = "core") -> None:
+        r"""freeze(mode="core") -> None
+
+        Freeze either the core linear layer (``mode="core"``) or the adaptive
+        hypernetwork (``mode="hyper"``).
+        """
+        if mode == "core":
+            self.freeze_core()
+        elif mode == "hyper":
+            self.freeze_hypernetwork()
+        else:
+            raise ValueError(f"Unknown freeze mode '{mode}'; expected 'core' or 'hyper'")
 
     def freeze_core(self) -> None:
         r"""freeze_core() -> None

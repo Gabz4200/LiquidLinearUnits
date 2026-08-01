@@ -97,8 +97,6 @@ class GDNLiquidLN(BaseLLU):
             device=device,
             dtype=dtype,
         )
-        dev = device if device is not None else DEVICE
-
         self.rank = rank
         self.normalize_input = normalize_input
         self.parameterization = parameterization
@@ -117,7 +115,7 @@ class GDNLiquidLN(BaseLLU):
             conv_bias=conv_bias,
             layer_idx=layer_idx,
             norm_eps=norm_eps,
-            device=dev,
+            device=device,
             dtype=dtype,
         )
 
@@ -127,16 +125,16 @@ class GDNLiquidLN(BaseLLU):
             in_features,
             proj_out_dim,
             bias=True,
-            device=dev,
+            device=device,
             dtype=dtype,
         )
 
         if self.parameterization == "svd":
-            self._create_svd_factors(dev, dtype)
+            self._create_svd_factors(device, dtype)
 
         # Dynamic bias projected from GDN-2 features
         self.bias_dynamic = (
-            nn.Linear(in_features, out_features, bias=True, device=dev, dtype=dtype)
+            nn.Linear(in_features, out_features, bias=True, device=device, dtype=dtype)
             if dynamic_bias
             else None
         )
@@ -151,8 +149,11 @@ class GDNLiquidLN(BaseLLU):
         path produces zero at step 1.
         """
         # Initialize GDN-2 internal weights
-        self.gdn2.apply(self.gdn2._initialize_weights)
+        gdn2 = self.gdn2
+        if hasattr(gdn2, "apply") and hasattr(gdn2, "_initialize_weights"):
+            gdn2.apply(getattr(gdn2, "_initialize_weights"))
 
+        assert self.rank is not None, "rank must be set"
         if self.parameterization == "lora":
             self._init_low_rank_adaptive(self.proj_out, self.rank * self.out_features, rank=self.rank)
         else:
@@ -187,7 +188,7 @@ class GDNLiquidLN(BaseLLU):
         # Run GDN-2 and project its output to dynamic factors, preserving the
         # original leading dimensions.
         orig_shape, gdn_out, raw, past_key_values = _run_gdn2_to_factors(
-            self.gdn2,
+            self.gdn2,  # type: ignore[arg-type]
             h_in,
             self.proj_out,
             rank=self.rank,
@@ -228,5 +229,5 @@ class GDNLiquidLN(BaseLLU):
         return (
             f"in={self.in_features}, out={self.out_features}, rank={self.rank}, "
             f"act={self.factor_activation}, norm_input={self.normalize_input}, "
-            f"gdn_mode={self.gdn2.mode}, mode={self.parameterization}"
+            f"gdn_mode={self.gdn2.mode}, mode={self.parameterization}"  # type: ignore[union-attr]
         )
